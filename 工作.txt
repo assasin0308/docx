@@ -1,0 +1,234 @@
+
+工作站管理平台(机场安检)
+
+后台接口接口svn地址：http://www.jimujiaoyu.com/jimujiaoyu/qHIWING/web/trunk  
+
+
+页前台页面svn地址：http://www.jimujiaoyu.com/jimujiaoyu/qHIWING/web/trunk/admin
+  npm install --save file-saver
+  npm install --save xlsx
+  npm install -D script-loader
+
+#########################################################################
+svn账号：
+用户名：shib
+密码：shib1024
+#########################################################################
+IP地址:192.168.0.175
+
+数据库:http://miniapi.smartxidian.com/phpmyadmin
+账号:root
+密码:qgtools!2016
+#########################################################################
+公司官网
+SVN http://www.jimujiaoyu.com/jimujiaoyu/muqiapp_homepage
+server
+账号:root
+密码:wuehyfwue!(*)
+数据库:root
+密码:muqi2014
+#########################################################################
+47.105.33.79
+账号:root
+密码:Qidaoapp2018
+数据库:root
+密码:Qidaoapp2018!
+
+#########################################################################
+ 有啦 Application
+http://www.jimujiaoyu.com/jimujiaoyu/qHGYJ/backend/trunk/qHGYJ_back(代码)
+http://shijx@www.jimujiaoyu.com/jimujiaoyu/dev_doc/doc/qHGYJ(接口文档)
+
+
+主机：121.199.16.88
+用户名：root
+密码：Vkogomuqi2014
+数据库:
+用户名：root
+密码：qgtools!2016  authentication_string 
+
+#################################################################################
+新华社1#
+qAlpha
+数据库:mongodb 
+服务器:
+HOST:123.57.92.122
+USER:root
+PWD:Yjy0417!@#
+###############################################################
+新华社2#
+服务器IP：47.92.249.29
+root   
+Fmci1234
+数据库:root
+newhua@news
+
+qAlpha 后台 svn    http://shijx@www.jimujiaoyu.com/jimujiaoyu/qDator/qAlpha/backend
+
+#############################################################
+
+有啦极光推送账号:
+账号：chemknow@126.com 
+密码:Cip001001
+
+########################################################################
+	
+滴滴熊 Application
+
+服务器:101.201.35.6
+服务器(后):39.96.32.173
+user: root
+密码:ddxq2$5*fkr224!^ 
+数据库:root  密码:sek!2#ddx&%23*
+       didixiongq 密码:23@4#5fv$r!v6.
+域名:http://ddbear-word.com
+后台管理系统:http://ddbear-word.com/admin_vue/dist
+app_web: http://ddbear-word.com/app_vue/dist
+第三方账户信息:
+  【高德地图】
+Key:
+ios:
+28c01a8c282bfb67eee9d16f5f104951
+
+android: 
+e7cee0780bdde097901e0ff997684b2d
+
+智能硬件:
+d78e0108d086cde3275931f7505c5e67
+
+【环信】
+AppKey:
+1153181019253350#didixiong
+密码:
+qddx9uy!$#22e
+【极光】
+appkey:
+815aef3fc90f190a311df414
+【支付宝】
+appid:
+2018102561823637
+【微信开放平台】
+appid:
+wx193529594b6873b9
+appSecret:
+e5c0a40ca0c4fc1c2751928150c1d720
+【微信App商户平台】
+微信支付商户号 1517695111
+商户平台登录帐号 1517695111@1517695111  
+应用APPID wx193529594b6873b9
+密钥(Key): 513cd98af16ad2dd3011df662070ba6b
+【公众号商户平台】
+微信支付商户号
+1514161041
+商户平台登录帐号
+1514161041@1514161041
+申请对应的公众号
+嘀嘀熊官方（）
+公众号APPID
+wx94d755bced843d76
+密钥(Key): 21b9227ab5f788f8043adb5c6c66b685
+
+
+################################################################################
+我的服务器: 
+root
+
+19920308shibin!
+数据库:
+root
+
+19920308shibin
+
+#################################################
+易测 windows
+代理:https://121.46.130.106
+cip 
+CIP64518879
+ 192.168.0.6
+administrator
+YICE123456
+
+
+易测后---------------
+VPN
+EASYCONNECT
+服务器地址https://121.46.130.106
+用户名：cip
+密码：123456Abc.
+
+
+化工社版权系统  59.110.229.170 administrator/Founder123 -------------windows服务器
+
+#########################################
+醉美青海正式:
+服务器 39.105.148.90
+
+root
+密码
+ZMQHapp2018,,
+数据库:root
+密码:zmqh2018
+
+3#
+39.105.30.190
+root
+ZMQHapp2018,,
+
+2#
+39.107.141.177
+root
+ZMQHapp2018,,
+
+
+
+测试:
+123.56.66.42
+
+
+用户名：root
+
+
+密码:ZHANGchenxi0826,,
+数据库:root
+密码:qmotor!2015
+
+醉美青海
+账号
+阿里云帐号:wenlvappapp
+
+密码:wenlv2018   
+手机号:13810269045
+
+友盟账号: 2411459930@qq.com
+密码:ZMQH2018app
+
+#########################################################
+化工社 :
+47.95.150.246
+root
+pwd: cip-easYTest6451.Web
+数据库: root
+pwd:cip-easYTest6451.Web
+
+内网redis:  r-2zedefc1e51a6194.redis.rds.aliyuncs.com
+auth: cip_easYTest6451_Web
+
+##########################################################
+高考AI小程序
+
+阿里云短信:
+LTAIWMHCqWhy8MrQ
+AccessKeySecret：
+um0nxzPO3b7HQ1HGmYYDzGC5qH5rsL
+短信模板OCDE :  SMS_166476601
+您的验证码${code}，该验证码5分钟内有效，请勿泄漏于他人！
+微信配置:
+const APPID = 'wx2cf58d77e7a8d6cf';
+const APPSECRET = '3ef93b217a4e8ad4250f14bde219a80e';
+const MCHID = '1537402411';  //商户号
+const KEY = '62e1d2fe56ef7cc1dbf2d3d4445f84c0'; //商户支付秘钥
+--------------------------------------------------------------------------------------------------
+高考帮一帮
+appid:wx741b4dbc224f2434
+AppSecret:e476ddfa36e762e5ed1fdc516e2d149b
+##########################################################
