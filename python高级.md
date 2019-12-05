@@ -6237,10 +6237,10 @@ git config --global user.email 'assasin0308@sina.com'
 git clone git@github.com:账号名/项目名.git
 
 #与远程库交互
-# 从远程库获取到本地
-git pull
+# 从远程分支库获取到本地
+git pull origin master(从指定分支拉取代码)
 # 将本地提交远程库
-git push origin master
+git push origin 本地分支:master(远程分支)
 # 提示：每次提交前，需要先获取，解决冲突后再次提交
 
 # 3. 本地仓库
@@ -6255,7 +6255,14 @@ git init
 # 创建成功后，目录结构如下图：
 
 #版本库就是一个目录，这个目录里面的所有文件都可以被Git管理起来，每个文件的修改、删除，Git都能跟踪，以便任何时刻都可以追踪历史，或者在将来某个时刻可以“还原”
-
+git branch #查看分支
+git branch 分支名 # 创建分支
+git checkout 分支名 # 切换分支
+git checkout -b 分支名 # 创建并切换分支
+git branch -d 分支名 # 删除分支
+git tag -a 版本号 -m '版本说明' # 打标签
+git tag # 查看标签
+git push origin 本地分支:远程分支 --tags  # 提交标签至远程
 # 文件管理
 # 本地仓库分为三部分：工作区，暂存区，仓库区，其中暂存区、仓库区是版本库部分
 
@@ -9679,7 +9686,9 @@ pip install scrapy-redis
 	# Duplication Filter
 	# Item Pipeline
 	# Base Spider
-    
+
+# scrapy-redis在scrapy的架构上增加了redis，基于redis的特性拓展了如下组件：
+
 # 1. Scheduler
 # Scrapy改造了python本来的collection.deque(双向队列)形成了自己的Scrapy queue(https://github.com/scrapy/queuelib/blob/master/queuelib/queue.py))，但是Scrapy多个spider不能共享待爬取队列Scrapy queue， 即Scrapy本身不支持爬虫分布式，scrapy-redis 的解决是把这个Scrapy queue换成redis数据库（也是指redis队列），从同一个redis-server存放要爬取的request，便能让多个spider去同一个数据库里读取。
 
@@ -10513,192 +10522,5002 @@ class RedisCrawlSpider(RedisMixin, CrawlSpider):
 # scrapy-redis的总体思路：这个工程通过重写scheduler和spider类，实现了调度、spider启动和redis的交互。实现新的dupefilter和queue类，达到了判重和调度容器和redis的交互，因为每个主机上的爬虫进程都访问同一个redis数据库，所以调度和判重都统一进行统一管理，达到了分布式爬虫的目的。 当spider被初始化时，同时会初始化一个对应的scheduler对象，这个调度器对象通过读取settings，配置好自己的调度容器queue和判重工具dupefilter。每当一个spider产出一个request的时候，scrapy内核会把这个reuqest递交给这个spider对应的scheduler对象进行调度，scheduler对象通过访问redis对request进行判重，如果不重复就把他添加进redis中的调度池。当调度条件满足时，scheduler对象就从redis的调度池中取出一个request发送给spider，让他爬取。当spider爬取的所有暂时可用url之后，scheduler发现这个spider对应的redis的调度池空了，于是触发信号spider_idle，spider收到这个信号之后，直接连接redis读取strart url池，拿去新的一批url入口，然后再次重复上边的工作。
 ```
 
-## 十 Scrapy-redis 案例
+## 十  Scrapy-redis 案例
 
-### 170. 
+### 170. 源码说明 
 
 ```python
+# 使用scrapy-redis的example修改
+# 先从github上拿到scrapy-redis的示例，然后将里面的example-project目录移到指定的地址：
+
+# clone github scrapy-redis源码文件
+git clone https://github.com/rolando/scrapy-redis.git
+
+# 直接拿官方的项目范例，改名为自己的项目用（针对懒癌患者)
+mv scrapy-redis/example-project ~/scrapyredis-project
+
+scrapy-redis 源码中有自带一个example-project项目，这个项目包含3个spider，分别是dmoz, myspider_redis，mycrawler_redis
+
+
+# 一、dmoz (class DmozSpider(CrawlSpider))
+# 这个爬虫继承的是CrawlSpider，它是用来说明Redis的持续性，当我们第一次运行dmoz爬虫，然后Ctrl + C停掉之后，再运行dmoz爬虫，之前的爬取记录是保留在Redis里的。
+
+# 分析起来，其实这就是一个 scrapy-redis 版 CrawlSpider 类，需要设置Rule规则，以及callback不能写parse()方法。
+
+# 执行方式：scrapy crawl dmoz
+from scrapy.linkextractors import LinkExtractor
+from scrapy.spiders import CrawlSpider, Rule
+
+
+class DmozSpider(CrawlSpider):
+    """Follow categories and extract links."""
+    name = 'dmoz'
+    allowed_domains = ['dmoz.org']
+    start_urls = ['http://www.dmoz.org/']
+
+    rules = [
+        Rule(LinkExtractor(
+            restrict_css=('.top-cat', '.sub-cat', '.cat-item')
+        ), callback='parse_directory', follow=True),
+    ]
+
+    def parse_directory(self, response):
+        for div in response.css('.title-and-desc'):
+            yield {
+                'name': div.css('.site-title::text').extract_first(),
+                'description': div.css('.site-descr::text').extract_first().strip(),
+                'link': div.css('a::attr(href)').extract_first(),
+            }
+            
+# 二、myspider_redis (class MySpider(RedisSpider))
+# 这个爬虫继承了RedisSpider， 它能够支持分布式的抓取，采用的是basic spider，需要写parse函数。
+
+# 其次就是不再有start_urls了，取而代之的是redis_key，scrapy-redis将key从Redis里pop出来，成为请求的url地址。
+from scrapy_redis.spiders import RedisSpider
+
+
+class MySpider(RedisSpider):
+    """Spider that reads urls from redis queue (myspider:start_urls)."""
+    name = 'myspider_redis'
+
+    # 注意redis-key的格式：
+    redis_key = 'myspider:start_urls'
+
+    # 可选：等效于allowd_domains()，__init__方法按规定格式写，使用时只需要修改super()里的类名参数即可
+    def __init__(self, *args, **kwargs):
+        # Dynamically define the allowed domains list.
+        domain = kwargs.pop('domain', '')
+        self.allowed_domains = filter(None, domain.split(','))
+
+        # 修改这里的类名为当前类名
+        super(MySpider, self).__init__(*args, **kwargs)
+
+    def parse(self, response):
+        return {
+            'name': response.css('title::text').extract_first(),
+            'url': response.url,
+        }
+    
+# 注意：RedisSpider类 不需要写allowd_domains和start_urls：
+
+#	1.scrapy-redis将从在构造方法__init__()里动态定义爬虫爬取域范围，也可以选择直接写allowd_domains。
+
+#	2.必须指定redis_key，即启动爬虫的命令，参考格式：redis_key = 'myspider:start_urls'
+
+#	3.根据指定的格式，start_urls将在 Master端的 redis-cli 里 lpush 到 Redis数据库里，RedisSpider 将在数据库里获取start_urls。
+
+# 执行方式：
+#	1.通过runspider方法执行爬虫的py文件（也可以分次执行多条），爬虫（们）将处于等待准备状态：
+scrapy runspider myspider_redis.py
+#	2.在Master端的redis-cli输入push指令，参考格式：
+$redis > lpush myspider:start_urls http://www.dmoz.org/       
+#	3.Slaver端爬虫获取到请求，开始爬取。
+
+# 三、mycrawler_redis (class MyCrawler(RedisCrawlSpider))
+# 这个RedisCrawlSpider类爬虫继承了RedisCrawlSpider，能够支持分布式的抓取。因为采用的是crawlSpider，所以需要遵守Rule规则，以及callback不能写parse()方法。
+
+# 同样也不再有start_urls了，取而代之的是redis_key，scrapy-redis将key从Redis里pop出来，成为请求的url地址。
+from scrapy.spiders import Rule
+from scrapy.linkextractors import LinkExtractor
+
+from scrapy_redis.spiders import RedisCrawlSpider
+
+
+class MyCrawler(RedisCrawlSpider):
+    """Spider that reads urls from redis queue (myspider:start_urls)."""
+    name = 'mycrawler_redis'
+    redis_key = 'mycrawler:start_urls'
+
+    rules = (
+        # follow all links
+        Rule(LinkExtractor(), callback='parse_page', follow=True),
+    )
+
+    # __init__方法必须按规定写，使用时只需要修改super()里的类名参数即可
+    def __init__(self, *args, **kwargs):
+        # Dynamically define the allowed domains list.
+        domain = kwargs.pop('domain', '')
+        self.allowed_domains = filter(None, domain.split(','))
+
+        # 修改这里的类名为当前类名
+        super(MyCrawler, self).__init__(*args, **kwargs)
+
+    def parse_page(self, response):
+        return {
+            'name': response.css('title::text').extract_first(),
+            'url': response.url,
+        }
+    
+# 注意：同样的，RedisCrawlSpider类不需要写allowd_domains和start_urls：
+
+#	1.scrapy-redis将从在构造方法__init__()里动态定义爬虫爬取域范围，也可以选择直接写allowd_domains。
+
+#	2.必须指定redis_key，即启动爬虫的命令，参考格式：redis_key = 'myspider:start_urls'
+
+#	3.根据指定的格式，start_urls将在 Master端的 redis-cli 里 lpush 到 Redis数据库里，RedisSpider 将在数据库里获取start_urls。 
+
+# 执行方式：
+#	1.通过runspider方法执行爬虫的py文件（也可以分次执行多条），爬虫（们）将处于等待准备状态：
+scrapy runspider mycrawler_redis.py
+#	2.在Master端的redis-cli输入push指令，参考格式：
+$redis > lpush mycrawler:start_urls http://www.dmoz.org/
+#	3.爬虫获取url，开始执行。
+
+# 总结:
+# 1.如果只是用到Redis的去重和保存功能，就选第一种；
+# 2.如果要写分布式，则根据情况，选择第二种、第三种；
+# 3.通常情况下，会选择用第三种方式编写深度聚焦爬虫。
+```
+
+### 171. 有缘网分布式(一)
+
+```python
+# clone github scrapy-redis源码文件
+git clone https://github.com/rolando/scrapy-redis.git
+
+# 直接拿官方的项目范例，改名为自己的项目用
+mv scrapy-redis/example-project ~/scrapy-youyuan
+
+# 1.修改settings.py
+# 指定使用scrapy-redis的调度器
+SCHEDULER = "scrapy_redis.scheduler.Scheduler"
+
+# 指定使用scrapy-redis的去重
+DUPEFILTER_CLASS = 'scrapy_redis.dupefilters.RFPDupeFilter'
+
+# 指定排序爬取地址时使用的队列，
+# 默认的 按优先级排序(Scrapy默认)，由sorted set实现的一种非FIFO、LIFO方式。
+SCHEDULER_QUEUE_CLASS = 'scrapy_redis.queue.SpiderPriorityQueue'
+# 可选的 按先进先出排序（FIFO）
+# SCHEDULER_QUEUE_CLASS = 'scrapy_redis.queue.SpiderQueue'
+# 可选的 按后进先出排序（LIFO）
+# SCHEDULER_QUEUE_CLASS = 'scrapy_redis.queue.SpiderStack'
+
+# 在redis中保持scrapy-redis用到的各个队列，从而允许暂停和暂停后恢复，也就是不清理redis queues
+SCHEDULER_PERSIST = True
+
+# 只在使用SpiderQueue或者SpiderStack是有效的参数，指定爬虫关闭的最大间隔时间
+# SCHEDULER_IDLE_BEFORE_CLOSE = 10
+
+# 通过配置RedisPipeline将item写入key为 spider.name : items 的redis的list中，供后面的分布式处理item
+# 这个已经由 scrapy-redis 实现，不需要我们写代码
+ITEM_PIPELINES = {
+    'example.pipelines.ExamplePipeline': 300,
+    'scrapy_redis.pipelines.RedisPipeline': 400
+}
+
+# 指定redis数据库的连接参数
+# REDIS_PASS是我自己加上的redis连接密码（默认不做）
+REDIS_HOST = '127.0.0.1'
+REDIS_PORT = 6379
+#REDIS_PASS = 'redisP@ssw0rd'
+
+# LOG等级
+LOG_LEVEL = 'DEBUG'
+
+#默认情况下,RFPDupeFilter只记录第一个重复请求。将DUPEFILTER_DEBUG设置为True会记录所有重复的请求。
+DUPEFILTER_DEBUG =True
+
+# 覆盖默认请求头，可以自己编写Downloader Middlewares设置代理和UserAgent
+DEFAULT_REQUEST_HEADERS = {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.8',
+    'Connection': 'keep-alive',
+    'Accept-Encoding': 'gzip, deflate, sdch'
+}
+
+# 2. 查看pipeline.py
+from datetime import datetime
+
+class ExamplePipeline(object):
+    def process_item(self, item, spider):
+        #utcnow() 是获取UTC时间
+        item["crawled"] = datetime.utcnow()
+        # 爬虫名
+        item["spider"] = spider.name
+        return item
+    
+# 3.修改items.py
+from scrapy.item import Item, Field
+
+class youyuanItem(Item):
+    # 个人头像链接
+    header_url = Field()
+    # 用户名
+    username = Field()
+    # 内心独白
+    monologue = Field()
+    # 相册图片链接
+    pic_urls = Field()
+    # 年龄
+    age = Field()
+
+    # 网站来源 youyuan
+    source = Field()
+    # 个人主页源url
+    source_url = Field()
+
+    # 获取UTC时间
+    crawled = Field()
+    # 爬虫名
+    spider = Field()
+    
+# 4.编写 spiders/youyuan.py
+from scrapy.linkextractors import LinkExtractor
+from scrapy.spiders import CrawlSpider, Rule
+# 使用redis去重
+from scrapy.dupefilters import RFPDupeFilter
+
+from example.items import youyuanItem
+import re
+
+#
+class YouyuanSpider(CrawlSpider):
+    name = 'youyuan'
+    allowed_domains = ['youyuan.com']
+    # 有缘网的列表页
+    start_urls = ['http://www.youyuan.com/find/beijing/mm18-25/advance-0-0-0-0-0-0-0/p1/']
+
+    # 搜索页面匹配规则，根据response提取链接
+    list_page_lx = LinkExtractor(allow=(r'http://www.youyuan.com/find/.+'))
+
+    # 北京、18~25岁、女性 的 搜索页面匹配规则，根据response提取链接
+    page_lx = LinkExtractor(allow =(r'http://www.youyuan.com/find/beijing/mm18-25/advance-0-0-0-0-0-0-0/p\d+/'))
+
+    # 个人主页 匹配规则，根据response提取链接
+    profile_page_lx = LinkExtractor(allow=(r'http://www.youyuan.com/\d+-profile/'))
+
+    rules = (
+        # 匹配find页面，跟进链接，跳板
+        Rule(list_page_lx, follow=True),
+
+        # 匹配列表页成功，跟进链接，跳板
+        Rule(page_lx, follow=True),
+
+        # 匹配个人主页的链接，形成request保存到redis中等待调度，一旦有响应则调用parse_profile_page()回调函数处理，不做继续跟进
+        Rule(profile_page_lx, callback='parse_profile_page', follow=False),
+    )
+
+    # 处理个人主页信息，得到我们要的数据
+    def parse_profile_page(self, response):
+        item = youyuanItem()
+        item['header_url'] = self.get_header_url(response)
+        item['username'] = self.get_username(response)
+        item['monologue'] = self.get_monologue(response)
+        item['pic_urls'] = self.get_pic_urls(response)
+        item['age'] = self.get_age(response)
+        item['source'] = 'youyuan'
+        item['source_url'] = response.url
+
+        #print "Processed profile %s" % response.url
+        yield item
+
+
+    # 提取头像地址
+    def get_header_url(self, response):
+        header = response.xpath('//dl[@class=\'personal_cen\']/dt/img/@src').extract()
+        if len(header) > 0:
+            header_url = header[0]
+        else:
+            header_url = ""
+        return header_url.strip()
+
+    # 提取用户名
+    def get_username(self, response):
+        usernames = response.xpath("//dl[@class=\'personal_cen\']/dd/div/strong/text()").extract()
+        if len(usernames) > 0:
+            username = usernames[0]
+        else:
+            username = "NULL"
+        return username.strip()
+
+    # 提取内心独白
+    def get_monologue(self, response):
+        monologues = response.xpath("//ul[@class=\'requre\']/li/p/text()").extract()
+        if len(monologues) > 0:
+            monologue = monologues[0]
+        else:
+            monologue = "NULL"
+        return monologue.strip()
+
+    # 提取相册图片地址
+    def get_pic_urls(self, response):
+        pic_urls = []
+        data_url_full = response.xpath('//li[@class=\'smallPhoto\']/@data_url_full').extract()
+        if len(data_url_full) <= 1:
+            pic_urls.append("");
+        else:
+            for pic_url in data_url_full:
+                pic_urls.append(pic_url)
+        if len(pic_urls) <= 1:
+            return "NULL"
+        # 每个url用|分隔
+        return '|'.join(pic_urls)
+
+    # 提取年龄
+    def get_age(self, response):
+        age_urls = response.xpath("//dl[@class=\'personal_cen\']/dd/p[@class=\'local\']/text()").extract()
+        if len(age_urls) > 0:
+            age = age_urls[0]
+        else:
+            age = "0"
+        age_words = re.split(' ', age)
+        if len(age_words) <= 2:
+            return "0"
+        age = age_words[2][:-1]
+        # 从age字符串开始匹配数字，失败返回None
+        if re.compile(r'[0-9]').match(age):
+            return age
+        return "0"
+    
+# 5. 运行程序
+# 1.Master端打开 Redis： redis-server
+# 2.Slave端直接运行爬虫： scrapy crawl youyuan
+# 3.多个Slave端运行爬虫顺序没有限制。
+    
+```
+
+### 172. 有缘网分布式(二)
+
+```python
+# 修改 spiders/youyuan.py
+from scrapy.linkextractors import LinkExtractor
+#from scrapy.spiders import CrawlSpider, Rule
+
+# 1. 导入RedisCrawlSpider类，不使用CrawlSpider
+from scrapy_redis.spiders import RedisCrawlSpider
+from scrapy.spiders import Rule
+
+
+from scrapy.dupefilters import RFPDupeFilter
+from example.items import youyuanItem
+import re
+
+# 2. 修改父类 RedisCrawlSpider
+# class YouyuanSpider(CrawlSpider):
+class YouyuanSpider(RedisCrawlSpider):
+    name = 'youyuan'
+
+# 3. 取消 allowed_domains() 和 start_urls
+##### allowed_domains = ['youyuan.com']
+##### start_urls = ['http://www.youyuan.com/find/beijing/mm18-25/advance-0-0-0-0-0-0-0/p1/']
+
+# 4. 增加redis-key
+    redis_key = 'youyuan:start_urls'
+
+    list_page_lx = LinkExtractor(allow=(r'http://www.youyuan.com/find/.+'))
+    page_lx = LinkExtractor(allow =(r'http://www.youyuan.com/find/beijing/mm18-25/advance-0-0-0-0-0-0-0/p\d+/'))
+    profile_page_lx = LinkExtractor(allow=(r'http://www.youyuan.com/\d+-profile/'))
+
+    rules = (
+        Rule(list_page_lx, follow=True),
+        Rule(page_lx, follow=True),
+        Rule(profile_page_lx, callback='parse_profile_page', follow=False),
+    )
+
+# 5. 增加__init__()方法，动态获取allowed_domains()
+    def __init__(self, *args, **kwargs):
+        domain = kwargs.pop('domain', '')
+        self.allowed_domains = filter(None, domain.split(','))
+        super(youyuanSpider, self).__init__(*args, **kwargs)
+
+    # 处理个人主页信息，得到我们要的数据
+    def parse_profile_page(self, response):
+        item = youyuanItem()
+        item['header_url'] = self.get_header_url(response)
+        item['username'] = self.get_username(response)
+        item['monologue'] = self.get_monologue(response)
+        item['pic_urls'] = self.get_pic_urls(response)
+        item['age'] = self.get_age(response)
+        item['source'] = 'youyuan'
+        item['source_url'] = response.url
+
+        yield item
+
+    # 提取头像地址
+    def get_header_url(self, response):
+        header = response.xpath('//dl[@class=\'personal_cen\']/dt/img/@src').extract()
+        if len(header) > 0:
+            header_url = header[0]
+        else:
+            header_url = ""
+        return header_url.strip()
+
+    # 提取用户名
+    def get_username(self, response):
+        usernames = response.xpath("//dl[@class=\'personal_cen\']/dd/div/strong/text()").extract()
+        if len(usernames) > 0:
+            username = usernames[0]
+        else:
+            username = "NULL"
+        return username.strip()
+
+    # 提取内心独白
+    def get_monologue(self, response):
+        monologues = response.xpath("//ul[@class=\'requre\']/li/p/text()").extract()
+        if len(monologues) > 0:
+            monologue = monologues[0]
+        else:
+            monologue = "NULL"
+        return monologue.strip()
+
+    # 提取相册图片地址
+    def get_pic_urls(self, response):
+        pic_urls = []
+        data_url_full = response.xpath('//li[@class=\'smallPhoto\']/@data_url_full').extract()
+        if len(data_url_full) <= 1:
+            pic_urls.append("");
+        else:
+            for pic_url in data_url_full:
+                pic_urls.append(pic_url)
+        if len(pic_urls) <= 1:
+            return "NULL"
+        return '|'.join(pic_urls)
+
+    # 提取年龄
+    def get_age(self, response):
+        age_urls = response.xpath("//dl[@class=\'personal_cen\']/dd/p[@class=\'local\']/text()").extract()
+        if len(age_urls) > 0:
+            age = age_urls[0]
+        else:
+            age = "0"
+        age_words = re.split(' ', age)
+        if len(age_words) <= 2:
+            return "0"
+        age = age_words[2][:-1]
+        if re.compile(r'[0-9]').match(age):
+            return age
+        return "0"
+    
+# 分布式爬虫执行方式：
+# 6. 在Master端启动redis-server：
+redis-server
+
+# 7. 在Slave端分别启动爬虫，不分先后：
+scrapy runspider youyuan.py
+
+# 8. 在Master端的redis-cli里push一个start_urls  
+redis-cli> lpush youyuan:start_urls http://www.youyuan.com/find/beijing/mm18-25/advance-0-0-0-0-0-0-0/p1/
+
+# 9. 爬虫启动，查看redis数据库数据。        
+```
+
+### 173. 数据处理
+
+```python
+# 存入MongoDB数据库
+
+# 1. 启动MongoDB数据库：sudo mongod
+
+# 2.执行下面程序：python2 process_youyuan_mongodb.py
+
+import json
+import redis
+import pymongo
+
+def main():
+
+    # 指定Redis数据库信息
+    rediscli = redis.StrictRedis(host='192.168.199.108', port=6379, db=0)
+    # 指定MongoDB数据库信息
+    mongocli = pymongo.MongoClient(host='localhost', port=27017)
+
+    # 创建数据库名
+    db = mongocli['youyuan']
+    # 创建表名
+    sheet = db['beijing_18_25']
+
+    while True:
+        # FIFO模式为 blpop，LIFO模式为 brpop，获取键值
+        source, data = rediscli.blpop(["youyuan:items"])
+
+        item = json.loads(data)
+        sheet.insert(item)
+
+        try:
+            print u"Processing: %(name)s <%(link)s>" % item
+        except KeyError:
+            print u"Error procesing: %r" % item
+
+if __name__ == '__main__':
+    main()
+    
+
+#  存入 MySQL数据库
+# 启动mysql：mysql.server start（更平台不一样）
+# 登录到root用户：mysql -uroot -p
+# 创建数据库youyuan:create database youyuan;
+# 切换到指定数据库：use youyuan
+# 创建表beijing_18_25以及所有字段的列名和数据类型。
+# 执行下面程序：python2 process_youyuan_mysql.py
+
+import json
+import redis
+import MySQLdb
+
+def main():
+    # 指定redis数据库信息
+    rediscli = redis.StrictRedis(host='192.168.199.108', port = 6379, db = 0)
+    # 指定mysql数据库
+    mysqlcli = MySQLdb.connect(host='127.0.0.1', user='power', passwd='xxxxxxx', db = 'youyuan', port=3306, use_unicode=True)
+
+    while True:
+        # FIFO模式为 blpop，LIFO模式为 brpop，获取键值
+        source, data = rediscli.blpop(["youyuan:items"])
+        item = json.loads(data)
+
+        try:
+            # 使用cursor()方法获取操作游标
+            cur = mysqlcli.cursor()
+            # 使用execute方法执行SQL INSERT语句
+            cur.execute("INSERT INTO beijing_18_25 (username, crawled, age, spider, header_url, source, pic_urls, monologue, source_url) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s )", [item['username'], item['crawled'], item['age'], item['spider'], item['header_url'], item['source'], item['pic_urls'], item['monologue'], item['source_url']])
+            # 提交sql事务
+            mysqlcli.commit()
+            #关闭本次操作
+            cur.close()
+            print "inserted %s" % item['source_url']
+        except MySQLdb.Error,e:
+            print "Mysql Error %d: %s" % (e.args[0], e.args[1])
+
+if __name__ == '__main__':
+    main()
+```
+
+### 174. 新浪网分布式
+
+```python
+# items.py文件
+
+import scrapy
+
+import sys
+reload(sys)
+sys.setdefaultencoding("utf-8")
+
+class SinaItem(scrapy.Item):
+    # 大类的标题 和 url
+    parentTitle = scrapy.Field()
+    parentUrls = scrapy.Field()
+
+    # 小类的标题 和 子url
+    subTitle = scrapy.Field()
+    subUrls = scrapy.Field()
+
+    # 小类目录存储路径
+    # subFilename = scrapy.Field()
+
+    # 小类下的子链接
+    sonUrls = scrapy.Field()
+
+    # 文章标题和内容
+    head = scrapy.Field()
+    content = scrapy.Field()
+
+# settings.py文件
+SPIDER_MODULES = ['Sina.spiders']
+NEWSPIDER_MODULE = 'Sina.spiders'
+
+USER_AGENT = 'scrapy-redis (+https://github.com/rolando/scrapy-redis)'
+
+DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
+SCHEDULER = "scrapy_redis.scheduler.Scheduler"
+SCHEDULER_PERSIST = True
+SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderPriorityQueue"
+#SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderQueue"
+#SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderStack"
+
+ITEM_PIPELINES = {
+#    'Sina.pipelines.SinaPipeline': 300,
+    'scrapy_redis.pipelines.RedisPipeline': 400,
+}
+
+LOG_LEVEL = 'DEBUG'
+
+# Introduce an artifical delay to make use of parallelism. to speed up the
+# crawl.
+DOWNLOAD_DELAY = 1
+
+REDIS_HOST = "192.168.13.26"
+REDIS_PORT = 6379
+
+# spiders/sina.py
+from Sina.items import SinaItem
+from scrapy_redis.spiders import RedisSpider
+#from scrapy.spiders import Spider
+import scrapy
+
+import sys
+reload(sys)
+sys.setdefaultencoding("utf-8")
+
+#class SinaSpider(Spider):
+class SinaSpider(RedisSpider):
+    name= "sina"
+    redis_key = "sinaspider:start_urls"
+    #allowed_domains= ["sina.com.cn"]
+    #start_urls= [
+    #   "http://news.sina.com.cn/guide/"
+    #]#起始urls列表
+
+    def __init__(self, *args, **kwargs):
+        domain = kwargs.pop('domain', '')
+        self.allowed_domains = filter(None, domain.split(','))
+        super(SinaSpider, self).__init__(*args, **kwargs)
+
+
+    def parse(self, response):
+        items= []
+
+        # 所有大类的url 和 标题
+        parentUrls = response.xpath('//div[@id=\"tab01\"]/div/h3/a/@href').extract()
+        parentTitle = response.xpath("//div[@id=\"tab01\"]/div/h3/a/text()").extract()
+
+        # 所有小类的ur 和 标题
+        subUrls  = response.xpath('//div[@id=\"tab01\"]/div/ul/li/a/@href').extract()
+        subTitle = response.xpath('//div[@id=\"tab01\"]/div/ul/li/a/text()').extract()
+
+        #爬取所有大类
+        for i in range(0, len(parentTitle)):
+
+            # 指定大类的路径和目录名
+            #parentFilename = "./Data/" + parentTitle[i]
+
+            #如果目录不存在，则创建目录
+            #if(not os.path.exists(parentFilename)):
+            #    os.makedirs(parentFilename)
+
+            # 爬取所有小类
+            for j in range(0, len(subUrls)):
+                item = SinaItem()
+
+                # 保存大类的title和urls
+                item['parentTitle'] = parentTitle[i]
+                item['parentUrls'] = parentUrls[i]
+
+                # 检查小类的url是否以同类别大类url开头，如果是返回True (sports.sina.com.cn 和 sports.sina.com.cn/nba)
+                if_belong = subUrls[j].startswith(item['parentUrls'])
+
+                # 如果属于本大类，将存储目录放在本大类目录下
+                if(if_belong):
+                    #subFilename =parentFilename + '/'+ subTitle[j]
+
+                    # 如果目录不存在，则创建目录
+                    #if(not os.path.exists(subFilename)):
+                    #    os.makedirs(subFilename)
+
+                    # 存储 小类url、title和filename字段数据
+                    item['subUrls'] = subUrls[j]
+                    item['subTitle'] =subTitle[j]
+                    #item['subFilename'] = subFilename
+
+                    items.append(item)
+
+        #发送每个小类url的Request请求，得到Response连同包含meta数据 一同交给回调函数 second_parse 方法处理
+        for item in items:
+            yield scrapy.Request( url = item['subUrls'], meta={'meta_1': item}, callback=self.second_parse)
+
+    #对于返回的小类的url，再进行递归请求
+    def second_parse(self, response):
+        # 提取每次Response的meta数据
+        meta_1= response.meta['meta_1']
+
+        # 取出小类里所有子链接
+        sonUrls = response.xpath('//a/@href').extract()
+
+        items= []
+        for i in range(0, len(sonUrls)):
+            # 检查每个链接是否以大类url开头、以.shtml结尾，如果是返回True
+            if_belong = sonUrls[i].endswith('.shtml') and sonUrls[i].startswith(meta_1['parentUrls'])
+
+            # 如果属于本大类，获取字段值放在同一个item下便于传输
+            if(if_belong):
+                item = SinaItem()
+                item['parentTitle'] =meta_1['parentTitle']
+                item['parentUrls'] =meta_1['parentUrls']
+                item['subUrls'] =meta_1['subUrls']
+                item['subTitle'] =meta_1['subTitle']
+                #item['subFilename'] = meta_1['subFilename']
+                item['sonUrls'] = sonUrls[i]
+                items.append(item)
+
+        #发送每个小类下子链接url的Request请求，得到Response后连同包含meta数据 一同交给回调函数 detail_parse 方法处理
+        for item in items:
+                yield scrapy.Request(url=item['sonUrls'], meta={'meta_2':item}, callback = self.detail_parse)
+
+    # 数据解析方法，获取文章标题和内容
+    def detail_parse(self, response):
+        item = response.meta['meta_2']
+        content = ""
+        head = response.xpath('//h1[@id=\"main_title\"]/text()').extract()
+        content_list = response.xpath('//div[@id=\"artibody\"]/p/text()').extract()
+
+        # 将p标签里的文本内容合并到一起
+        for content_one in content_list:
+            content += content_one
+
+        item['head']= head[0] if len(head) > 0 else "NULL"
+
+        item['content']= content
+
+        yield item
+  
+
+# 执行：        
+# slave端：
+scrapy runspider sina.py
+
+# Master端：
+redis-cli> lpush sinaspider:start_urls http://news.sina.com.cn/guide/
+```
+
+### 175. IT桔子
+
+```python
+# 1. items.py
+import scrapy
+
+class CompanyItem(scrapy.Item):
+
+    # 公司id (url数字部分)
+    info_id = scrapy.Field()
+    # 公司名称
+    company_name = scrapy.Field()
+    # 公司口号
+    slogan = scrapy.Field()
+    # 分类
+    scope = scrapy.Field()
+    # 子分类
+    sub_scope = scrapy.Field()
+
+    # 所在城市
+    city = scrapy.Field()
+    # 所在区域
+    area = scrapy.Field()
+    # 公司主页
+    home_page = scrapy.Field()
+    # 公司标签
+    tags = scrapy.Field()
+
+    # 公司简介
+    company_intro = scrapy.Field()
+    # 公司全称：
+    company_full_name = scrapy.Field()
+    # 成立时间：
+    found_time = scrapy.Field()
+    # 公司规模：
+    company_size = scrapy.Field()
+    # 运营状态
+    company_status = scrapy.Field()
+
+    # 投资情况列表：包含获投时间、融资阶段、融资金额、投资公司
+    tz_info = scrapy.Field()
+    # 团队信息列表：包含成员姓名、成员职称、成员介绍
+    tm_info = scrapy.Field()
+    # 产品信息列表：包含产品名称、产品类型、产品介绍
+    pdt_info = scrapy.Field()
+    
+# settings.py
+BOT_NAME = 'itjuzi'
+
+SPIDER_MODULES = ['itjuzi.spiders']
+NEWSPIDER_MODULE = 'itjuzi.spiders'
+
+# Enables scheduling storing requests queue in redis.
+SCHEDULER = "scrapy_redis.scheduler.Scheduler"
+
+# Ensure all spiders share same duplicates filter through redis.
+DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
+
+# REDIS_START_URLS_AS_SET = True
+
+COOKIES_ENABLED = False
+
+DOWNLOAD_DELAY = 1.5
+
+# 支持随机下载延迟
+RANDOMIZE_DOWNLOAD_DELAY = True
+
+# Obey robots.txt rules
+ROBOTSTXT_OBEY = False
+
+ITEM_PIPELINES = {
+    'scrapy_redis.pipelines.RedisPipeline': 300
+}
+
+DOWNLOADER_MIDDLEWARES = {
+    # 该中间件将会收集失败的页面，并在爬虫完成后重新调度。（失败情况可能由于临时的问题，例如连接超时或者HTTP 500错误导致失败的页面）
+   'scrapy.downloadermiddlewares.retry.RetryMiddleware': 80,
+
+    # 该中间件提供了对request设置HTTP代理的支持。您可以通过在 Request 对象中设置 proxy 元数据来开启代理。
+    'scrapy.downloadermiddlewares.httpproxy.HttpProxyMiddleware': 100,
+
+    'itjuzi.middlewares.RotateUserAgentMiddleware': 200,
+}
+
+REDIS_HOST = "192.168.199.108"
+REDIS_PORT = 6379
+
+
+# middlewares.py
+from scrapy.contrib.downloadermiddleware.useragent import UserAgentMiddleware
+import random
+
+# User-Agetn 下载中间件
+class RotateUserAgentMiddleware(UserAgentMiddleware):
+    def __init__(self, user_agent=''):
+        self.user_agent = user_agent
+
+    def process_request(self, request, spider):
+        # 这句话用于随机选择user-agent
+        ua = random.choice(self.user_agent_list)
+        request.headers.setdefault('User-Agent', ua)
+
+    user_agent_list = [
+        "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.1 (KHTML, like Gecko) Chrome/22.0.1207.1 Safari/537.1",
+        "Mozilla/5.0 (X11; CrOS i686 2268.111.0) AppleWebKit/536.11 (KHTML, like Gecko) Chrome/20.0.1132.57 Safari/536.11",
+        "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/536.6 (KHTML, like Gecko) Chrome/20.0.1092.0 Safari/536.6",
+        "Mozilla/5.0 (Windows NT 6.2) AppleWebKit/536.6 (KHTML, like Gecko) Chrome/20.0.1090.0 Safari/536.6",
+        "Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.1 (KHTML, like Gecko) Chrome/19.77.34.5 Safari/537.1",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/536.5 (KHTML, like Gecko) Chrome/19.0.1084.9 Safari/536.5",
+        "Mozilla/5.0 (Windows NT 6.0) AppleWebKit/536.5 (KHTML, like Gecko) Chrome/19.0.1084.36 Safari/536.5",
+        "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1063.0 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 5.1) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1063.0 Safari/536.3",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_8_0) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1063.0 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 6.2) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1062.0 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1062.0 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 6.2) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1061.1 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1061.1 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1061.1 Safari/536.3",
+        "Mozilla/5.0 (Windows NT 6.2) AppleWebKit/536.3 (KHTML, like Gecko) Chrome/19.0.1061.0 Safari/536.3",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/535.24 (KHTML, like Gecko) Chrome/19.0.1055.1 Safari/535.24",
+        "Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/535.24 (KHTML, like Gecko) Chrome/19.0.1055.1 Safari/535.24",
+        "Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US) AppleWebKit/531.21.8 (KHTML, like Gecko) Version/4.0.4 Safari/531.21.10",
+        "Mozilla/5.0 (Windows; U; Windows NT 5.2; en-US) AppleWebKit/533.17.8 (KHTML, like Gecko) Version/5.0.1 Safari/533.17.8",
+        "Mozilla/5.0 (Windows; U; Windows NT 6.1; en-US) AppleWebKit/533.19.4 (KHTML, like Gecko) Version/5.0.2 Safari/533.18.5",
+        "Mozilla/5.0 (Windows; U; Windows NT 6.1; en-GB; rv:1.9.1.17) Gecko/20110123 (like Firefox/3.x) SeaMonkey/2.0.12",
+        "Mozilla/5.0 (Windows NT 5.2; rv:10.0.1) Gecko/20100101 Firefox/10.0.1 SeaMonkey/2.7.1",
+        "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_5_8; en-US) AppleWebKit/532.8 (KHTML, like Gecko) Chrome/4.0.302.2 Safari/532.8",
+        "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_4; en-US) AppleWebKit/534.3 (KHTML, like Gecko) Chrome/6.0.464.0 Safari/534.3",
+        "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_5; en-US) AppleWebKit/534.13 (KHTML, like Gecko) Chrome/9.0.597.15 Safari/534.13",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_2) AppleWebKit/535.1 (KHTML, like Gecko) Chrome/14.0.835.186 Safari/535.1",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_6_8) AppleWebKit/535.2 (KHTML, like Gecko) Chrome/15.0.874.54 Safari/535.2",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_6_8) AppleWebKit/535.7 (KHTML, like Gecko) Chrome/16.0.912.36 Safari/535.7",
+        "Mozilla/5.0 (Macintosh; U; Mac OS X Mach-O; en-US; rv:2.0a) Gecko/20040614 Firefox/3.0.0 ",
+        "Mozilla/5.0 (Macintosh; U; PPC Mac OS X 10.5; en-US; rv:1.9.0.3) Gecko/2008092414 Firefox/3.0.3",
+        "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.5; en-US; rv:1.9.1) Gecko/20090624 Firefox/3.5",
+        "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.6; en-US; rv:1.9.2.14) Gecko/20110218 AlexaToolbar/alxf-2.0 Firefox/3.6.14",
+        "Mozilla/5.0 (Macintosh; U; PPC Mac OS X 10.5; en-US; rv:1.9.2.15) Gecko/20110303 Firefox/3.6.15",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.6; rv:2.0.1) Gecko/20100101 Firefox/4.0.1"
+    ]
+    
+# spiders/juzi.py 
+from bs4 import BeautifulSoup
+from scrapy.linkextractors import LinkExtractor
+from scrapy.spiders import CrawlSpider, Rule
+
+from scrapy_redis.spiders import RedisCrawlSpider
+from itjuzi.items import CompanyItem
+
+
+class ITjuziSpider(RedisCrawlSpider):
+    name = 'itjuzi'
+    allowed_domains = ['www.itjuzi.com']
+    # start_urls = ['http://www.itjuzi.com/company']
+    redis_key = 'itjuzispider:start_urls'
+    rules = [
+        # 获取每一页的链接
+        Rule(link_extractor=LinkExtractor(allow=('/company\?page=\d+'))),
+        # 获取每一个公司的详情
+        Rule(link_extractor=LinkExtractor(allow=('/company/\d+')), callback='parse_item')
+    ]
+
+    def parse_item(self, response):
+        soup = BeautifulSoup(response.body, 'lxml')
+
+        # 开头部分： //div[@class="infoheadrow-v2 ugc-block-item"]
+        cpy1 = soup.find('div', class_='infoheadrow-v2')
+        if cpy1:
+            # 公司名称：//span[@class="title"]/b/text()[1]
+            company_name = cpy1.find(class_='title').b.contents[0].strip().replace('\t', '').replace('\n', '')
+
+            # 口号： //div[@class="info-line"]/p
+            slogan = cpy1.find(class_='info-line').p.get_text()
+
+            # 分类：子分类//span[@class="scope c-gray-aset"]/a[1]
+            scope_a = cpy1.find(class_='scope c-gray-aset').find_all('a')
+            # 分类：//span[@class="scope c-gray-aset"]/a[1]
+            scope = scope_a[0].get_text().strip() if len(scope_a) > 0 else ''
+            # 子分类：# //span[@class="scope c-gray-aset"]/a[2]
+            sub_scope = scope_a[1].get_text().strip() if len(scope_a) > 1 else ''
+
+            # 城市+区域：//span[@class="loca c-gray-aset"]/a
+            city_a = cpy1.find(class_='loca c-gray-aset').find_all('a')
+            # 城市：//span[@class="loca c-gray-aset"]/a[1]
+            city = city_a[0].get_text().strip() if len(city_a) > 0 else ''
+            # 区域：//span[@class="loca c-gray-aset"]/a[2]
+            area = city_a[1].get_text().strip() if len(city_a) > 1 else ''
+
+            # 主页：//a[@class="weblink marl10"]/@href
+            home_page = cpy1.find(class_='weblink marl10')['href']
+            # 标签：//div[@class="tagset dbi c-gray-aset"]/a
+            tags = cpy1.find(class_='tagset dbi c-gray-aset').get_text().strip().strip().replace('\n', ',')
+
+        #基本信息：//div[@class="block-inc-info on-edit-hide"]
+        cpy2 = soup.find('div', class_='block-inc-info on-edit-hide')
+        if cpy2:
+
+            # 公司简介：//div[@class="block-inc-info on-edit-hide"]//div[@class="des"]
+            company_intro = cpy2.find(class_='des').get_text().strip()
+
+            # 公司全称：成立时间：公司规模：运行状态：//div[@class="des-more"]
+            cpy2_content = cpy2.find(class_='des-more').contents
+
+            # 公司全称：//div[@class="des-more"]/div[1]
+            company_full_name = cpy2_content[1].get_text().strip()[len('公司全称：'):] if cpy2_content[1] else ''
+
+            # 成立时间：//div[@class="des-more"]/div[2]/span[1]
+            found_time = cpy2_content[3].contents[1].get_text().strip()[len('成立时间：'):] if cpy2_content[3] else ''
+
+            # 公司规模：//div[@class="des-more"]/div[2]/span[2]
+            company_size = cpy2_content[3].contents[3].get_text().strip()[len('公司规模：'):] if cpy2_content[3] else ''
+
+            #运营状态：//div[@class="des-more"]/div[3]
+            company_status = cpy2_content[5].get_text().strip() if cpy2_content[5] else ''
+
+        # 主体信息：
+        main = soup.find('div', class_='main')
+
+        # 投资情况：//table[@class="list-round-v2 need2login"]
+          # 投资情况，包含获投时间、融资阶段、融资金额、投资公司
+        tz = main.find('table', 'list-round-v2')
+        tz_list = []
+        if tz:
+            all_tr = tz.find_all('tr')
+            for tr in all_tr:
+                tz_dict = {}
+                all_td = tr.find_all('td')
+                tz_dict['tz_time'] = all_td[0].span.get_text().strip()
+                tz_dict['tz_round'] = all_td[1].get_text().strip()
+                tz_dict['tz_finades'] = all_td[2].get_text().strip()
+                tz_dict['tz_capital'] = all_td[3].get_text().strip().replace('\n', ',')
+                tz_list.append(tz_dict)
+
+        # 团队信息：成员姓名、成员职称、成员介绍
+        tm = main.find('ul', class_='list-prodcase limited-itemnum')
+        tm_list = []
+        if tm:
+            for li in tm.find_all('li'):
+                tm_dict = {}
+                tm_dict['tm_m_name'] = li.find('span', class_='c').get_text().strip()
+                tm_dict['tm_m_title'] = li.find('span', class_='c-gray').get_text().strip()
+                tm_dict['tm_m_intro'] = li.find('p', class_='mart10 person-des').get_text().strip()
+                tm_list.append(tm_dict)
+
+        # 产品信息：产品名称、产品类型、产品介绍
+        pdt = main.find('ul', class_='list-prod limited-itemnum')
+        pdt_list = []
+        if pdt:
+            for li in pdt.find_all('li'):
+                pdt_dict = {}
+                pdt_dict['pdt_name'] = li.find('h4').b.get_text().strip()
+                pdt_dict['pdt_type'] = li.find('span', class_='tag yellow').get_text().strip()
+                pdt_dict['pdt_intro'] = li.find(class_='on-edit-hide').p.get_text().strip()
+                pdt_list.append(pdt_dict)
+
+        item = CompanyItem()
+        item['info_id'] = response.url.split('/')[-1:][0]
+        item['company_name'] = company_name
+        item['slogan'] = slogan
+        item['scope'] = scope
+        item['sub_scope'] = sub_scope
+        item['city'] = city
+        item['area'] = area
+        item['home_page'] = home_page
+        item['tags'] = tags
+        item['company_intro'] = company_intro
+        item['company_full_name'] = company_full_name
+        item['found_time'] = found_time
+        item['company_size'] = company_size
+        item['company_status'] = company_status
+        item['tz_info'] = tz_list
+        item['tm_info'] = tm_list
+        item['pdt_info'] = pdt_list
+        return item
+    
+# scrapy.cfg
+# Automatically created by: scrapy startproject
+#
+# For more information about the [deploy] section see:
+# https://scrapyd.readthedocs.org/en/latest/deploy.html
+
+[settings]
+default = itjuzi.settings
+
+[deploy]
+#url = http://localhost:6800/
+project = itjuzi
+
+
+# 运行:
+# Slave端：
+scrapy runspider juzi.py
+
+# Master端：
+redis-cli > lpush itjuzispider:start_urls http://www.itjuzi.com/company
+    
 
 ```
 
-### 171.
+## 十一  Tornado
+
+### 176. 介绍
 
 ```python
+# Tornado全称Tornado Web Server，是一个用Python语言写成的Web服务器兼Web应用框架，由FriendFeed公司在自己的网站FriendFeed中使用，被Facebook收购以后框架在2009年9月以开源软件形式开放给大众。
+
+# 特点：
+
+# 1. 作为Web框架，是一个轻量级的Web框架，类似于另一个Python web框架Web.py，其拥有异步非阻塞IO的处理方式。
+# 2.作为Web服务器，Tornado有较为出色的抗负载能力，官方用nginx反向代理的方式部署Tornado和其它Python web应用框架进行对比，结果最大浏览量超过第二名近40%。
+# 3.性能：Tornado有着优异的性能。它试图解决C10k问题，即处理大于或等于一万的并发
+
+# Tornado框架和服务器一起组成一个WSGI的全栈替代品。单独在WSGI容器中使用tornado网络框架或者tornaod http服务器，有一定的局限性，为了最大化的利用tornado的性能，推荐同时使用tornaod的网络框架和HTTP服务器
+
+# Tornado与Django
+# Django是走大而全的方向，注重的是高效开发，它最出名的是其全自动化的管理后台：只需要使用起ORM，做简单的对象定义，它就能自动生成数据库结构、以及全功能的管理后台。
+
+# Django提供的方便，也意味着Django内置的ORM跟框架内的其他模块耦合程度高，应用程序必须使用Django内置的ORM，否则就不能享受到框架内提供的种种基于其ORM的便利。
+
+# session功能
+# 后台管理
+# ORM
+
+# Tornado走的是少而精的方向，注重的是性能优越，它最出名的是异步非阻塞的设计方式。
+
+# HTTP服务器
+# 异步编程
+# WebSockets
+
 
 ```
 
-### 172.
+### 177. 安装
 
 ```python
+#  pip install tornado
+```
+
+### 178. Hello Wrold
+
+```python
+import tornado.web
+  import tornado.ioloop
+
+  class IndexHandler(tornado.web.RequestHandler):
+      """主路由处理类"""
+      def post(self):  # 我们修改了这里
+          """对应http的post请求方式"""
+          self.write("Hello Wrold!")
+
+  if __name__ == "__main__":
+      app = tornado.web.Application([
+          (r"/", IndexHandler),
+      ])
+      app.listen(8000)
+      tornado.ioloop.IOLoop.current().start()
+        
+# 代码讲解:
+# 1. tornado.web
+# tornado的基础web框架模块
+# RequestHandler 封装了对应一个请求的所有信息和方法，write(响应信息)就是写响应信息的一个方法；对应每一种http请求方式（get、post等），把对应的处理逻辑写进同名的成员方法中（如对应get请求方式，就将对应的处理逻辑写在get()方法中），当没有对应请求方式的成员方法时，会返回“405: Method Not Allowed”错误。
+# Application Tornado Web框架的核心应用类，是与服务器对接的接口，里面保存了路由信息表，其初始化接收的第一个参数就是一个路由信息映射元组的列表；其listen(端口)方法用来创建一个http服务器实例，并绑定到给定端口（注意：此时服务器并未开启监听）。
+
+# 2. tornado.ioloop
+# tornado的核心io循环模块，封装了Linux的epoll和BSD的kqueue，tornado高性能的基石。
+# IOLoop.current()  返回当前线程的IOLoop实例。
+# IOLoop.start() 启动IOLoop实例的I/O循环,同时服务器监听被打开。
+
+# 思路总结:
+# 创建web应用实例对象，第一个初始化参数为路由映射列表。
+# 定义实现路由映射列表中的handler类。
+# 创建服务器实例，绑定服务器端口。
+# 启动当前线程的IOLoop。
+
 
 ```
 
-### 173.
+### 179. httpserver
 
 ```python
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver # 新引入httpserver模块
+
+class IndexHandler(tornado.web.RequestHandler):
+    """主路由处理类"""
+    def get(self):
+        """对应http的get请求方式"""
+        self.write("Hello Itcast!")
+
+if __name__ == "__main__":
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+    ])
+    # ------------------------------
+    # 我们修改这个部分
+    # app.listen(8000)
+    http_server = tornado.httpserver.HTTPServer(app) 
+    http_server.listen(8000)
+    # ------------------------------
+    tornado.ioloop.IOLoop.current().start()
+
+# 引入了tornado.httpserver模块，顾名思义，它就是tornado的HTTP服务器实现。
+
+# 我们创建了一个HTTP服务器实例http_server，因为服务器要服务于我们刚刚建立的web应用，将接收到的客户端请求通过web应用中的路由映射表引导到对应的handler中，所以在构建http_server对象的时候需要传出web应用对象app。http_server.listen(8000)将服务器绑定到8000端口。
+
+# 实际上一版代码中app.listen(8000)正是对这一过程的简写    
+    
+```
+
+### 180.  单进程与多进程
+
+```python
+# 一次启动多个进程，修改上面的代码如下：
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver 
+
+class IndexHandler(tornado.web.RequestHandler):
+    """主路由处理类"""
+    def get(self):
+        """对应http的get请求方式"""
+        self.write("Hello Itcast!")
+
+if __name__ == "__main__":
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+    ])
+    http_server = tornado.httpserver.HTTPServer(app) 
+    # -----------修改----------------
+    http_server.bind(8000)
+    http_server.start(0)
+    # ------------------------------
+    tornado.ioloop.IOLoop.current().start()
+    
+# http_server.bind(port)方法是将服务器绑定到指定端口。
+
+# http_server.start(num_processes=1)方法指定开启几个进程，参数num_processes默认值为1，即默认仅开启一个进程；如果num_processes为None或者<=0，则自动根据机器硬件的cpu核芯数创建同等数目的子进程；如果num_processes>0，则创建num_processes个子进程。 
+
+# 说明:
+# 1.关于app.listen()
+# app.listen()这个方法只能在单进程模式中使用。
+
+# 对于app.listen()与手动创建HTTPServer实例
+
+http_server = tornado.httpserver.HTTPServer(app) 
+http_server.listen(8000)
+
+# 这两种方式，建议使用后者即创建HTTPServer实例的方式，因为其对于理解tornado web应用工作流程的完整性有帮助，便于大家记忆tornado开发的模块组成和程序结构；在熟练使用后，可以改为简写。
+
+# 2.关于多进程
+# 虽然tornado提供了一次开启多个进程的方法，但是由于：
+# 每个子进程都会从父进程中复制一份IOLoop实例，如过在创建子进程前我们的代码动了IOLoop实例，那么会影响到每一个子进程，势必会干扰到子进程IOLoop的工作；
+# 所有进程是由一个命令一次开启的，也就无法做到在不停服务的情况下更新代码；
+# 所有进程共享同一个端口，想要分别单独监控每一个进程就很困难。
+# 不建议使用这种多进程的方式，而是手动开启多个进程，并且绑定不同的端口。
 
 ```
 
-### 174.
+### 181. options
 
 ```python
+# tornado.options模块——全局参数定义、存储、转换。
+tornado.options.define()
+# 用来定义options选项变量的方法，定义的变量可以在全局的tornado.options.options中获取使用，传入参数：
+
+#	name 选项变量名，须保证全局唯一性，否则会报“Option 'xxx' already defined in ...”的错误；
+#	default　选项变量的默认值，如不传默认为None；
+#	type 选项变量的类型，从命令行或配置文件导入参数的时候tornado会根据这个类型转换输入的值，转换不成功时会报错，可以是str、float、int、datetime、timedelta中的某个，若未设置则根据default的值自动推断，若default也未设置，那么不再进行转换。可以通过利用设置type类型字段来过滤不正确的输入。
+#	multiple 选项变量的值是否可以为多个，布尔类型，默认值为False，如果multiple为True，那么设置选项变量时值与值之间用英文逗号分隔，而选项变量则是一个list列表（若默认值和输入均未设置，则为空列表[]）。
+#	help 选项变量的帮助提示信息，在命令行启动tornado时，通过加入命令行参数 --help　可以查看所有选项变量的信息（注意，代码中需要加入tornado.options.parse_command_line()）。
+
+tornado.options.options
+# 全局的options对象，所有定义的选项变量都会作为该对象的属性。
+
+tornado.options.parse_command_line()
+# 转换命令行参数，并将转换后的值对应的设置到全局options对象相关属性上。追加命令行参数的方式是--myoption=myvalue
+
+# opt.py
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options # 新导入的options模块
+
+tornado.options.define("port", default=8000, type=int, help="run server on the given port.") # 定义服务器监听端口选项
+tornado.options.define("itcast", default=[], type=str, multiple=True, help="itcast subjects.") # 无意义，演示多值情况
+
+class IndexHandler(tornado.web.RequestHandler):
+    """主路由处理类"""
+    def get(self):
+        """对应http的get请求方式"""
+        self.write("Hello Itcast!")
+
+if __name__ == "__main__":
+    tornado.options.parse_command_line()
+    print tornado.options.options.itcast # 输出多值选项
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+    ])
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(tornado.options.options.port)
+    tornado.ioloop.IOLoop.current().start()
+    
+# 开启程序： 
+python opt.py --port=9000 --itcast=python,c++,java,php,ios
+
+tornado.options.parse_config_file(path)
+# 从配置文件导入option，配置文件中的选项格式如下：
+myoption = "myvalue"
+myotheroption = "myothervalue"
+
+# 新建配置文件config，注意字符串和列表按照python的语法格式：
+port = 8000
+itcast = ["python","c++","java","php","ios"]
+
+# 修改opt.py文件：
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options # 新导入的options模块
+
+tornado.options.define("port", default=8000, type=int, help="run server on the given port.") # 定义服务器监听端口选项
+tornado.options.define("itcast", default=[], type=str, multiple=True, help="itcast subjects.") # 无意义，演示多值情况
+
+class IndexHandler(tornado.web.RequestHandler):
+    """主路由处理类"""
+    def get(self):
+        """对应http的get请求方式"""
+        self.write("Hello Itcast!")
+
+if __name__ == "__main__":
+    tornado.options.parse_config_file("./config") # 仅仅修改了此处
+    print tornado.options.options.itcast # 输出多值选项
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+    ])
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(tornado.options.options.port)
+    tornado.ioloop.IOLoop.current().start()
+    
+    
+# 说明:
+# 1. 日志
+# 在代码中调用parse_command_line()或者parse_config_file()的方法时，tornado会默认为我们配置标准logging模块，即默认开启了日志功能，并向标准输出（屏幕）打印日志信息。
+# 关闭tornado默认的日志功能，可以在命令行中添加--logging=none 或者在代码中执行如下操作:
+from tornado.options import options, parse_command_line
+options.logging = None
+parse_command_line()
+
+# 2. 配置文件
+# 在使用prase_config_file()的时候，配置文件的书写格式仍需要按照python的语法要求，其优势是可以直接将配置文件的参数转换设置到全局对象tornado.options.options中；然而，其不方便的地方在于需要在代码中调用tornado.options.define()来定义选项，而且不支持字典类型，故而在实际应用中大都不使用这种方法。
+
+# 在使用配置文件的时候，通常会新建一个python文件（如config.py），然后在里面直接定义python类型的变量（可以是字典类型）；在需要配置文件参数的地方，将config.py作为模块导入，并使用其中的变量参数。
+
+# config.py文件：
+# conding:utf-8
+
+# Redis配置
+redis_options = {
+    'redis_host':'127.0.0.1',
+    'redis_port':6379,
+    'redis_pass':'',
+}
+
+# Tornado app配置
+settings = {
+    'template_path': os.path.join(os.path.dirname(__file__), 'templates'),
+    'static_path': os.path.join(os.path.dirname(__file__), 'statics'),
+    'cookie_secret':'0Q1AKOKTQHqaa+N80XhYW7KCGskOUE2snCW06UIxXgI=',
+    'xsrf_cookies':False,
+    'login_url':'/login',
+    'debug':True,
+}
+
+# 日志
+log_path = os.path.join(os.path.dirname(__file__), 'logs/log')
+
+# 使用config.py的模块中导入config，如下：
+# conding:utf-8
+
+import tornado.web
+import config
+
+if __name__ = "__main__":
+    app = tornado.web.Application([], **config.settings)
+...
+```
+
+### 182. Application
+
+```python
+# settings
+# debug，设置tornado是否工作在调试模式，默认为False即工作在生产模式。当设置debug=True 后，tornado会工作在调试/开发模式，在此种模式下，tornado为方便我们开发而提供了几种特性：
+
+#	自动重启，tornado应用会监控我们的源代码文件，当有改动保存后便会重启程序，这可以减少我们手动重启程序的次数。需要注意的是，一旦我们保存的更改有错误，自动重启会导致程序报错而退出，从而需要我们保存修正错误后手动启动程序。这一特性也可单独通过autoreload=True设置；
+#	取消缓存编译的模板，可以单独通过compiled_template_cache=False来设置；
+#	取消缓存静态文件hash值，可以单独通过static_hash_cache=False来设置；
+#	提供追踪信息，当RequestHandler或者其子类抛出一个异常而未被捕获后，会生成一个包含追踪信息的页面，可以单独通过serve_traceback=True来设置。
+
+# 使用debug参数的方法：
+
+import tornado.web
+app = tornado.web.Application([], debug=True)
+
+
+
+# 路由映射
+# 在构建路由映射列表的时候，使用的是二元元组，如：
+[(r"/", IndexHandler),]
+# 对于这个映射列表中的路由，实际上还可以传入多个信息，如：
+[
+    (r"/", Indexhandler),
+    (r"/cpp", ItcastHandler, {"subject":"c++"}),
+    url(r"/python", ItcastHandler, {"subject":"python"}, name="python_url")
+]
+# 对于路由中的字典，会传入到对应的RequestHandler的initialize()方法中：
+from tornado.web import RequestHandler
+class ItcastHandler(RequestHandler):
+    def initialize(self, subject):
+        self.subject = subject
+
+    def get(self):
+        self.write(self.subject)
+        
+# 对于路由中的name字段，注意此时不能再使用元组，而应使用tornado.web.url来构建。name是给该路由起一个名字，可以通过调用RequestHandler.reverse_url(name)来获取该名子对应的url。
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options
+from tornado.options import options, define
+from tornado.web import url, RequestHandler
+
+define("port", default=8000, type=int, help="run server on the given port.")
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        python_url = self.reverse_url("python_url")
+        self.write('<a href="%s">itcast</a>' %
+                   python_url)
+
+class ItcastHandler(RequestHandler):
+    def initialize(self, subject):
+        self.subject = subject
+
+    def get(self):
+        self.write(self.subject)
+
+if __name__ == "__main__":
+    tornado.options.parse_command_line()
+    app = tornado.web.Application([
+            (r"/", Indexhandler),
+            (r"/cpp", ItcastHandler, {"subject":"c++"}),
+            url(r"/python", ItcastHandler, {"subject":"python"}, name="python_url")
+        ],
+        debug = True)
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(options.port)
+    tornado.ioloop.IOLoop.current().start()
 
 ```
 
-### 175.
+### 183. 输入
 
 ```python
+# HTTP协议向服务器传参有以下几种途径:
+# 查询字符串（query string)，形如key1=value1&key2=value2；
+# 请求体（body）中发送的数据，比如表单数据、json、xml；
+# 提取uri的特定部分，如/blogs/2016/09/0001，可以在服务器端的路由中用正则表达式截取；
+# 在http报文的头（header）中增加自定义字段，如X-XSRFToken=hello。
+
+# 1. 获取查询字符串参数
+get_query_argument(name, default=_ARG_DEFAULT, strip=True)
+# 从请求的查询字符串中返回指定参数name的值，如果出现多个同名参数，则返回最后一个的值。
+# default为设值未传name参数时返回的默认值，如若default也未设置，则会抛出tornado.web.MissingArgumentError异常。
+# strip表示是否过滤掉左右两边的空白字符，默认为过滤。
+get_query_arguments(name, strip=True)
+# 从请求的查询字符串中返回指定参数name的值，注意返回的是list列表（即使对应name参数只有一个值）。若未找到name参数，则返回空列表[]。
+# strip同前，不再赘述。
+
+# 2. 获取请求体参数
+get_body_argument(name, default=_ARG_DEFAULT, strip=True)
+# 从请求体中返回指定参数name的值，如果出现多个同名参数，则返回最后一个的值。
+# default与strip同前，不再赘述。
+get_body_arguments(name, strip=True)
+# 从请求体中返回指定参数name的值，注意返回的是list列表（即使对应name参数只有一个值）。若未找到name参数，则返回空列表[]。
+# strip同前，不再赘述。
+# 说明:
+# 对于请求体中的数据要求为字符串，且格式为表单编码格式（与url中的请求字符串格式相同），即key1=value1&key2=value2，HTTP报文头Header中的"Content-Type"为application/x-www-form-urlencoded 或 multipart/form-data。对于请求体数据为json或xml的，无法通过这两个方法获取。
+
+# 3. 前两类方法的整合
+get_argument(name, default=_ARG_DEFAULT, strip=True)
+# 从请求体和查询字符串中返回指定参数name的值，如果出现多个同名参数，则返回最后一个的值。
+# default与strip同前，不再赘述。
+get_arguments(name, strip=True)
+# 从请求体和查询字符串中返回指定参数name的值，注意返回的是list列表（即使对应name参数只有一个值）。若未找到name参数，则返回空列表[]。
+# strip同前，不再赘述。
+# 说明:
+# 对于请求体中数据的要求同前。 这两个方法最常用。
+# 代码示例:
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options
+from tornado.options import options, define
+from tornado.web import RequestHandler, MissingArgumentError
+
+define("port", default=8000, type=int, help="run server on the given port.")
+
+class IndexHandler(RequestHandler):
+    def post(self):
+        query_arg = self.get_query_argument("a")
+        query_args = self.get_query_arguments("a")
+        body_arg = self.get_body_argument("a")
+        body_args = self.get_body_arguments("a", strip=False)
+        arg = self.get_argument("a")
+        args = self.get_arguments("a")
+
+        default_arg = self.get_argument("b", "itcast")
+        default_args = self.get_arguments("b")
+
+        try:
+            missing_arg = self.get_argument("c")
+        except MissingArgumentError as e:
+            missing_arg = "We catched the MissingArgumentError!"
+            print e
+        missing_args = self.get_arguments("c")
+
+        rep = "query_arg:%s<br/>" % query_arg
+        rep += "query_args:%s<br/>" % query_args 
+        rep += "body_arg:%s<br/>"  % body_arg
+        rep += "body_args:%s<br/>" % body_args
+        rep += "arg:%s<br/>"  % arg
+        rep += "args:%s<br/>" % args 
+        rep += "default_arg:%s<br/>" % default_arg 
+        rep += "default_args:%s<br/>" % default_args 
+        rep += "missing_arg:%s<br/>" % missing_arg
+        rep += "missing_args:%s<br/>" % missing_args
+
+        self.write(rep)
+
+if __name__ == "__main__":
+    tornado.options.parse_command_line()
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+    ])
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(options.port)
+    tornado.ioloop.IOLoop.current().start()
+
+    
+# 4. 关于请求的其他信息 
+# RequestHandler.request 对象存储了关于请求的相关信息，具体属性有：
+#	method HTTP的请求方式，如GET或POST;
+#	host 被请求的主机名；
+#	uri 请求的完整资源标示，包括路径和查询字符串；
+#	path 请求的路径部分；
+#	query 请求的查询字符串部分；
+#	version 使用的HTTP版本；
+#	headers 请求的协议头，是类字典型的对象，支持关键字索引的方式获取特定协议头信息，例如：request.headers["Content-Type"]
+#	body 请求体数据；
+#	remote_ip 客户端的IP地址；
+#	files 用户上传的文件，为字典类型，型如：
+{
+  "form_filename1":[<tornado.httputil.HTTPFile>, <tornado.httputil.HTTPFile>],
+  "form_filename2":[<tornado.httputil.HTTPFile>,],
+  ... 
+}
+
+# tornado.httputil.HTTPFile是接收到的文件对象，它有三个属性：
+#	filename 文件的实际名字，与form_filename1不同，字典中的键名代表的是表单对应项的名字；
+#	body 文件的数据实体；
+#	content_type 文件的类型。 这三个对象属性可以像字典一样支持关键字索引，如request.files["form_filename1"][0]["body"]。
+
+# 实现一个上传文件并保存在服务器本地的小程序upload.py：
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options
+from tornado.options import options, define
+from tornado.web import RequestHandler
+
+define("port", default=8000, type=int, help="run server on the given port.")
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.write("hello itcast.")
+
+class UploadHandler(RequestHandler): 
+    def post(self):
+        files = self.request.files
+        img_files = files.get('img')
+        if img_files:
+            img_file = img_files[0]["body"]
+            file = open("./itcast", 'w+')
+            file.write(img_file)
+            file.close()
+        self.write("OK")
+
+if __name__ == "__main__":
+    tornado.options.parse_command_line()
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+        (r"/upload", UploadHandler),
+    ])
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(options.port)
+    tornado.ioloop.IOLoop.current().start()
+    
+    
+# 5. 正则提取uri
+# tornado中对于路由映射也支持正则提取uri，提取出来的参数会作为RequestHandler中对应请求方式的成员方法参数。若在正则表达式中定义了名字，则参数按名传递；若未定义名字，则参数按顺序传递。提取出来的参数会作为对应请求方式的成员方法的参数。
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options
+from tornado.options import options, define
+from tornado.web import RequestHandler
+
+define("port", default=8000, type=int, help="run server on the given port.")
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.write("hello itcast.")
+
+class SubjectCityHandler(RequestHandler):
+    def get(self, subject, city):
+        self.write(("Subject: %s<br/>City: %s" % (subject, city)))
+
+class SubjectDateHandler(RequestHandler):
+    def get(self, date, subject):
+        self.write(("Date: %s<br/>Subject: %s" % (date, subject)))
+
+if __name__ == "__main__":
+    tornado.options.parse_command_line()
+    app = tornado.web.Application([
+        (r"/", IndexHandler),
+        (r"/sub-city/(.+)/([a-z]+)", SubjectCityHandler), # 无名方式
+        (r"/sub-date/(?P<subject>.+)/(?P<date>\d+)", SubjectDateHandler), #　命名方式
+    ])
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(options.port)
+    tornado.ioloop.IOLoop.current().start()
+    
+# 建议：提取多个值时最好用命名方式。    
+```
+
+### 184. 输出
+
+```python
+# 1. write(chunk) 将chunk数据写到输出缓冲区。
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.write("hello world!")
+# 利用write方法写json数据:
+import json
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        stu = {
+            "name":"zhangsan",
+            "age":24,
+            "gender":1,
+        }
+        stu_json = json.dumps(stu)
+        self.write(stu_json)
+        
+# 不用自己手动去做json序列化，当write方法检测到我们传入的chunk参数是字典类型后，会自动帮我们转换为json字符串。
+class IndexHandler(RequestHandler):
+    def get(self):
+        stu = {
+            "name":"zhangsan",
+            "age":24,
+            "gender":1,
+        }
+        self.write(stu)
+        
+# 两种方式差异？
+# 对比两种方式的响应头header中Content-Type字段，自己手动序列化时为Content-Type:text/html; charset=UTF-8，而采用write方法时为Content-Type:application/json; charset=UTF-8。
+
+# write方法除了将字典转换为json字符串之外，还帮我们将Content-Type设置为application/json; charset=UTF-8。
+
+
+# 2. set_header(name, value)
+# 利用set_header(name, value)方法，可以手动设置一个名为name、值为value的响应头header字段。
+# 用set_header方法来完成上面write所做的工作。
+import json
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        stu = {
+            "name":"zhangsan",
+            "age":24,
+            "gender":1,
+        }
+        stu_json = json.dumps(stu)
+        self.write(stu_json)
+        self.set_header("Content-Type", "application/json; charset=UTF-8")
+        
+
+# 3. set_default_headers()
+# 该方法会在进入HTTP处理方法前先被调用，可以重写此方法来预先设置默认的headers。注意：在HTTP处理方法中使用set_header()方法会覆盖掉在set_default_headers()方法中设置的同名header。
+class IndexHandler(RequestHandler):
+    def set_default_headers(self):
+        print "执行了set_default_headers()"
+        # 设置get与post方式的默认响应体格式为json
+        self.set_header("Content-Type", "application/json; charset=UTF-8")
+        # 设置一个名为itcast、值为python的header
+        self.set_header("itcast", "python")
+
+    def get(self):
+        print "执行了get()"
+        stu = {
+            "name":"zhangsan",
+            "age":24,
+            "gender":1,
+        }
+        stu_json = json.dumps(stu)
+        self.write(stu_json)
+        self.set_header("itcast", "i love python") # 注意此处重写了header中的itcast字段
+
+    def post(self):
+        print "执行了post()"
+        stu = {
+            "name":"zhangsan",
+            "age":24,
+            "gender":1,
+        }
+        stu_json = json.dumps(stu)
+        self.write(stu_json)
+  
+
+
+# 4. set_status(status_code, reason=None)   为响应设置状态码。
+# 参数说明：
+#	status_code int类型，状态码，若reason为None，则状态码必须为下表中的。
+#	reason string类型，描述状态码的词组，若为None，则会被自动填充为下表中的内容。
+class Err404Handler(RequestHandler):
+    """对应/err/404"""
+    def get(self):
+        self.write("hello itcast")
+        self.set_status(404) # 标准状态码，不用设置reason
+
+class Err210Handler(RequestHandler):
+    """对应/err/210"""
+    def get(self):
+        self.write("hello itcast")
+        self.set_status(210, "itcast error") # 非标准状态码，设置了reason
+
+class Err211Handler(RequestHandler):
+    """对应/err/211"""
+    def get(self):
+        self.write("hello itcast")
+        self.set_status(211) # 非标准状态码，未设置reason，错误
+        
+        
+# 5. redirect(url)  告知浏览器跳转到url。
+class IndexHandler(RequestHandler):
+    """对应/"""
+    def get(self):
+        self.write("主页")
+
+class LoginHandler(RequestHandler):
+    """对应/login"""
+    def get(self):
+        self.write('<form method="post"><input type="submit" value="登陆"></form>')
+
+    def post(self):
+        self.redirect("/")
+  
+
+# 6. send_error(status_code=500, **kwargs)
+# 抛出HTTP错误状态码status_code，默认为500，kwargs为可变命名参数。使用send_error抛出错误后tornado会调用write_error()方法进行处理，并返回给浏览器处理后的错误页面。
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.write("主页")
+        self.send_error(404, content="出现404错误")
+# 注意：默认的write\_error()方法不会处理send\_error抛出的kwargs参数，即上面的代码中content="出现404错误"是没有意义的。
+# 示例代码:
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.write("主页")
+        self.send_error(404, content="出现404错误")
+        self.write("结束") # 我们在send_error再次向输出缓冲区写内容
+# 注意：使用send_error()方法后就不要再向输出缓冲区写内容了！
+
+
+# 7. write_error(status_code, **kwargs)
+# 用来处理send_error抛出的错误信息并返回给浏览器错误信息页面。可以重写此方法来定制自己的错误显示页面。
+class IndexHandler(RequestHandler):
+    def get(self):
+        err_code = self.get_argument("code", None) # 注意返回的是unicode字符串，下同
+        err_title = self.get_argument("title", "")
+        err_content = self.get_argument("content", "")
+        if err_code:
+            self.send_error(err_code, title=err_title, content=err_content)
+        else:
+            self.write("主页")
+
+    def write_error(self, status_code, **kwargs):
+        self.write(u"<h1>出错了，程序员GG正在赶过来！</h1>")
+        self.write(u"<p>错误名：%s</p>" % kwargs["title"])
+        self.write(u"<p>错误详情：%s</p>" % kwargs["content"])
+        
+        
+```
+
+### 185. 接口与调用顺序
+
+```python
+# 1. initialize()
+# 对应每个请求的处理类Handler在构造一个实例后首先执行initialize()方法。在讲输入时提到，路由映射中的第三个字典型参数会作为该方法的命名参数传递，如：
+class ProfileHandler(RequestHandler):
+    def initialize(self, database):
+        self.database = database
+
+    def get(self):
+        ...
+
+app = Application([
+    (r'/user/(.*)', ProfileHandler, dict(database=database)),
+    ])
+# 此方法通常用来初始化参数（对象属性），很少使用。
+
+
+# 2. prepare()
+# 预处理，即在执行对应请求方式的HTTP方法（如get、post等）前先执行，注意：不论以何种HTTP方式请求，都会执行prepare()方法。
+# 以预处理请求体中的json数据为例：
+import json
+
+class IndexHandler(RequestHandler):
+    def prepare(self):
+        if self.request.headers.get("Content-Type").startswith("application/json"):
+            self.json_dict = json.loads(self.request.body)
+        else:
+            self.json_dict = None
+
+    def post(self):
+        if self.json_dict:
+            for key, value in self.json_dict.items():
+                self.write("<h3>%s</h3><p>%s</p>" % (key, value))
+
+    def put(self):
+        if self.json_dict:
+            for key, value in self.json_dict.items():
+                self.write("<h3>%s</h3><p>%s</p>" % (key, value))
+
+                
+# 3. HTTP方法
+# get:请求指定的页面信息，并返回实体主体。
+# head:类似于get请求，只不过返回的响应中没有具体的内容，用于获取报头
+# post:向指定资源提交数据进行处理请求（例如提交表单或者上传文件）。数据被包含在请求体中。POST请求可能会导致新的资源的建立和/或已有资源的修改。
+# delete:请求服务器删除指定的内容。
+# patch:请求修改局部数据。
+# put:从客户端向服务器传送的数据取代指定的文档的内容。
+# options:返回给定URL支持的所有HTTP方法。
+
+# 4. on_finish()
+# 在请求处理结束后调用，即在调用HTTP方法后调用。通常该方法用来进行资源清理释放或处理日志等。注意：请尽量不要在此方法中进行响应输出。
+
+# 5. set_default_headers()
+# 6. write_error()
+# 7. 调用顺序
+class IndexHandler(RequestHandler):
+
+    def initialize(self):
+        print "调用了initialize()"
+
+    def prepare(self):
+        print "调用了prepare()"
+
+    def set_default_headers(self):
+        print "调用了set_default_headers()"
+
+    def write_error(self, status_code, **kwargs):
+        print "调用了write_error()"
+
+    def get(self):
+        print "调用了get()"
+
+    def post(self):
+        print "调用了post()"
+        self.send_error(200)  # 注意此出抛出了错误
+
+    def on_finish(self):
+        print "调用了on_finish()"
+        
+        
+# 在正常情况未抛出错误时，调用顺序为：
+# 1. set_defautl_headers()
+# 2. initialize()
+# 3. prepare()
+# 4. HTTP方法
+# 5. on_finish()
+
+# 在有错误抛出时，调用顺序为：
+# 1.  set_default_headers()
+# 2.  initialize()
+# 3.  prepare()
+# 4.  HTTP方法
+# 5.  set_default_headers()
+# 6.  write_error()
+# 7.  on_finish()
+```
+
+### 186. 静态文件
+
+```python
+#  static_path
+# 可以通过向web.Application类的构造函数传递一个名为static_path的参数来告诉Tornado从文件系统的一个特定位置提供静态文件，如：
+app = tornado.web.Application(
+    [(r'/', IndexHandler)],
+    static_path=os.path.join(os.path.dirname(__file__), "statics"),
+)
+# 在这里，设置了一个当前应用目录下名为statics的子目录作为static_path的参数。现在应用将以读取statics目录下的filename.ext来响应诸如/static/filename.ext的请求，并在响应的主体中返回。
+
+# 对于静态文件目录的命名，为了便于部署，建议使用static
+# 对于静态文件资源，可以通过http://127.0.0.1/static/html/index.html来访问。而且在index.html中引用的静态资源文件，我们给定的路径也符合/static/...的格式，故页面可以正常浏览。
+<link href="/static/plugins/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+<link href="/static/plugins/font-awesome/css/font-awesome.min.css" rel="stylesheet">
+<link href="/static/css/reset.css" rel="stylesheet">
+<link href="/static/css/main.css" rel="stylesheet">
+<link href="/static/css/index.css" rel="stylesheet">
+
+<script src="/static/js/jquery.min.js"></script>
+<script src="/static/plugins/bootstrap/js/bootstrap.min.js"></script>
+<script src="/static/js/index.js"></script>
+
+
+# StaticFileHandler
+# tornado.web.StaticFileHandler来自由映射静态文件与其访问路径url。
+# tornado.web.StaticFileHandler是tornado预置的用来提供静态资源文件的handler。
+import os
+
+current_path = os.path.dirname(__file__)
+app = tornado.web.Application(
+    [
+        (r'^/()$', StaticFileHandler, {"path":os.path.join(current_path, "statics/html"), "default_filename":"index.html"}),
+        (r'^/view/(.*)$', StaticFileHandler, {"path":os.path.join(current_path, "statics/html")}),
+    ],
+    static_path=os.path.join(current_path, "statics"),
+)
+
+# path 用来指明提供静态文件的根路径，并在此目录中寻找在路由中用正则表达式提取的文件名。
+# default_filename 用来指定访问路由中未指明文件名时，默认提供的文件。
+
+
+# 现在，对于静态文件statics/html/index.html，可以通过三种方式进行访问：
+
+# 1. http://127.0.0.1/static/html/index.html
+# 2. http://127.0.0.1/
+# 3. http://127.0.0.1/view/index.html
+```
+
+### 187. 使用模板
+
+```python
+# 1. 路径与渲染
+# 使用模板，需要仿照静态文件路径设置一样，向web.Application类的构造函数传递一个名为template_path的参数来告诉Tornado从文件系统的一个特定位置提供模板文件，如：
+app = tornado.web.Application(
+    [(r'/', IndexHandler)],
+    static_path=os.path.join(os.path.dirname(__file__), "statics"),
+    template_path=os.path.join(os.path.dirname(__file__), "templates"),
+)
+# 在这里，设置了一个当前应用目录下名为templates的子目录作为template_path的参数。在handler中使用的模板将在此目录中寻找。
+# 现在将静态文件目录statics/html中的index.html复制一份到templates目录中，此时文件目录结构为：
+.
+├── statics
+│   ├── css
+│   │   ├── index.css
+│   │   ├── main.css
+│   │   └── reset.css
+│   ├── html
+│   │   └── index.html
+│   ├── images
+│   │   ├── home01.jpg
+│   │   ├── home02.jpg
+│   │   ├── home03.jpg
+│   │   └── landlord01.jpg
+│   ├── js
+│   │   ├── index.js
+│   │   └── jquery.min.js
+│   └── plugins
+│       ├── bootstrap
+│       │   └─...
+│       └── font-awesome
+│           └─...
+├── templates
+│   └── index.html
+└── test.py
+
+# 在handler中使用render()方法来渲染模板并返回给客户端。
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.render("index.html") # 渲染主页模板，并返回给客户端。
+
+
+
+current_path = os.path.dirname(__file__)
+app = tornado.web.Application(
+    [
+        (r'^/$', IndexHandler),
+        (r'^/view/(.*)$', StaticFileHandler, {"path":os.path.join(current_path, "statics/html")}),
+    ],
+    static_path=os.path.join(current_path, "statics"),
+    template_path=os.path.join(os.path.dirname(__file__), "templates"),
+)
+
+
+# 2. 模板语法
+# 2-1 变量与表达式
+# 在tornado的模板中使用{{}}作为变量或表达式的占位符，使用render渲染后占位符{{}}会被替换为相应的结果值。
+# 将index.html中的一条房源信息记录:
+<li class="house-item">
+    <a href=""><img src="/static/images/home01.jpg"></a>
+    <div class="house-desc">
+        <div class="landlord-pic"><img src="/static/images/landlord01.jpg"></div>
+        <div class="house-price">￥<span>398</span>/晚</div>
+        <div class="house-intro">
+            <span class="house-title">宽窄巷子+160平大空间+文化保护区双地铁</span>
+            <em>整套出租 - 5分/6点评 - 北京市丰台区六里桥地铁</em>
+        </div>
+    </div>
+</li>
+
+# 改为模板：
+<li class="house-item">
+    <a href=""><img src="/static/images/home01.jpg"></a>
+    <div class="house-desc">
+        <div class="landlord-pic"><img src="/static/images/landlord01.jpg"></div>
+        <div class="house-price">￥<span>{{price}}</span>/晚</div>
+        <div class="house-intro">
+            <span class="house-title">{{title}}</span>
+            <em>整套出租 - {{score}}分/{{comments}}点评 - {{position}}</em>
+        </div>
+    </div>
+</li>
+# 渲染方式如下：
+class IndexHandler(RequestHandler):
+    def get(self):
+        house_info = {
+            "price": 398,
+            "title": "宽窄巷子+160平大空间+文化保护区双地铁",
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        }
+        self.render("index.html", **house_info)
+        
+# {{}}不仅可以包含变量，还可以是表达式，如：
+<li class="house-item">
+    <a href=""><img src="/static/images/home01.jpg"></a>
+    <div class="house-desc">
+        <div class="landlord-pic"><img src="/static/images/landlord01.jpg"></div>
+        <div class="house-price">￥<span>{{p1 + p2}}</span>/晚</div>
+        <div class="house-intro">
+            <span class="house-title">{{"+".join(titles)}}</span>
+            <em>整套出租 - {{score}}分/{{comments}}点评 - {{position}}</em>
+        </div>
+    </div>
+</li>
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        house_info = {
+            "p1": 198,
+            "p2": 200,
+            "titles": ["宽窄巷子", "160平大空间", "文化保护区双地铁"],
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        }
+        self.render("index.html", **house_info)
+        
+        
+# 2-2 控制语句
+# 可以在Tornado模板中使用Python条件和循环语句。控制语句以{\%和\%}包围，并以类似下面的形式被使用：
+{% if page is None %}
+# 或
+{% if len(entries) == 3 %}
+# 控制语句的大部分就像对应的Python语句一样工作，支持if、for、while，注意end:
+{% if ... %} ... {% elif ... %} ... {% else ... %} ... {% end %}
+{% for ... in ... %} ... {% end %}
+{% while ... %} ... {% end %}
+
+# 修改index.html:
+<ul class="house-list">
+    {% if len(houses) > 0 %}
+        {% for house in houses %}
+        <li class="house-item">
+            <a href=""><img src="/static/images/home01.jpg"></a>
+            <div class="house-desc">
+                <div class="landlord-pic"><img src="/static/images/landlord01.jpg"></div>
+                <div class="house-price">￥<span>{{house["price"]}}</span>/晚</div>
+                <div class="house-intro">
+                    <span class="house-title">{{house["title"]}}</span>
+                    <em>整套出租 - {{house["score"]}}分/{{house["comments"]}}点评 - {{house["position"]}}</em>
+                </div>
+            </div>
+        </li>
+        {% end %}
+    {% else %}
+        对不起，暂时没有房源。
+    {% end %}
+</ul>
+# python中渲染语句为：
+class IndexHandler(RequestHandler):
+    def get(self):
+        houses = [
+        {
+            "price": 398,
+            "title": "宽窄巷子+160平大空间+文化保护区双地铁",
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        },
+        {
+            "price": 398,
+            "title": "宽窄巷子+160平大空间+文化保护区双地铁",
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        },
+        {
+            "price": 398,
+            "title": "宽窄巷子+160平大空间+文化保护区双地铁",
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        },
+        {
+            "price": 398,
+            "title": "宽窄巷子+160平大空间+文化保护区双地铁",
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        },
+        {
+            "price": 398,
+            "title": "宽窄巷子+160平大空间+文化保护区双地铁",
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        }]
+        self.render("index.html", houses=houses)
+        
+
+# 2-3 函数
+# static_url()  生成静态文件目录下文件的URL
+<link rel="stylesheet" href="{{ static_url("style.css") }}">
+# 优点：
+#	static_url函数创建了一个基于文件内容的hash值，并将其添加到URL末尾（查询字符串的参数v）。这个hash值确保浏览器总是加载一个文件的最新版而不是之前的缓存版本。无论是在你应用的开发阶段，还是在部署到生产环境使用时，都非常有用，因为你的用户不必再为了看到你的静态内容而清除浏览器缓存了。
+#	另一个好处是你可以改变你应用URL的结构，而不需要改变模板中的代码。例如，可以通过设置static_url_prefix来更改Tornado的默认静态路径前缀/static。如果使用static_url而不是硬编码的话，代码不需要改变。
+
+# 转义
+# 新建一个表单页面new.html:
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>新建房源</title>
+    </head>
+    <body>
+        <form method="post">
+            <textarea name="text"></textarea>
+            <input type="submit" value="提交">
+        </form>
+        {{text}}
+    </body>
+</html>
+# 对应的handler为：
+class NewHandler(RequestHandler):
+
+    def get(self):
+        self.render("new.html", text="")
+
+    def post(self):
+        text = self.get_argument("text", "") 
+        print text
+        self.render("new.html", text=text)
+# 当我们在表单中填入如下内容时,写入的js程序并没有运行，而是显示出来了：：
+<script>alert("hello!");</script>
+# 查看页面源代码，发现<、>、"等被转换为对应的html字符。
+&lt;script&gt;alert(&quot;hello!&quot;);&lt;/script&gt;
+# 是因为tornado中默认开启了模板自动转义功能，防止网站受到恶意攻击。
+# 可以通过raw语句来输出不被转义的原始格式，如：
+{% raw text %}
+# 注意：在Firefox浏览器中会直接弹出alert窗口，而在Chrome浏览器中，需要set_header("X-XSS-Protection", 0)
+# 若要关闭自动转义，一种方法是在Application构造函数中传递autoescape=None，另一种方法是在每页模板中修改自动转义行为，添加如下语句：
+{% autoescape None %}
+
+# escape()
+# 关闭自动转义后，可以使用escape()函数来对特定变量进行转义，如：
+{{ escape(text) }}
+
+# 自定义函数
+# 在模板中还可以使用一个自己编写的函数，只需要将函数名作为模板的参数传递即可，就像其他变量一样。
+# 修改后端如下：
+def house_title_join(titles):
+    return "+".join(titles)
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        house_list = [
+        {
+            "price": 398,
+            "titles": ["宽窄巷子", "160平大空间", "文化保护区双地铁"],
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        },
+        {
+            "price": 398,
+            "titles": ["宽窄巷子", "160平大空间", "文化保护区双地铁"],
+            "score": 5,
+            "comments": 6,
+            "position": "北京市丰台区六里桥地铁"
+        }]
+        self.render("index.html", houses=house_list, title_join = house_title_join)
+        
+        
+# 前端模板我们修改为：  
+<ul class="house-list">
+    {% if len(houses) > 0 %}
+        {% for house in houses %}
+        <li class="house-item">
+            <a href=""><img src="/static/images/home01.jpg"></a>
+            <div class="house-desc">
+                <div class="landlord-pic"><img src="/static/images/landlord01.jpg"></div>
+                <div class="house-price">￥<span>{{house["price"]}}</span>/晚</div>
+                <div class="house-intro">
+                    <span class="house-title">{{title_join(house["titles"])}}</span>
+                    <em>整套出租 - {{house["score"]}}分/{{house["comments"]}}点评 - {{house["position"]}}</em>
+                </div>
+            </div>
+        </li>
+        {% end %}
+    {% else %}
+        对不起，暂时没有房源。
+    {% end %}
+</ul>
+
+
+# 2-4 块 可以使用块来复用模板，块语法如下：
+{% block block_name %} {% end %}
+# 对模板index.html进行抽象，抽离出父模板base.html如下：
+<!DOCTYPE html>
+<html>
+<head> 
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    {% block page_title %}{% end %}
+    <link href="{{static_url('plugins/bootstrap/css/bootstrap.min.css')}}" rel="stylesheet">
+    <link href="{{static_url('plugins/font-awesome/css/font-awesome.min.css')}}" rel="stylesheet">
+    <link href="{{static_url('css/reset.css')}}" rel="stylesheet">
+    <link href="{{static_url('css/main.css')}}" rel="stylesheet">
+    {% block css_files %}{% end %}
+</head>
+<body>
+    <div class="container">
+        <div class="top-bar">
+            {% block header %}{% end %}
+        </div>
+        {% block body %}{% end %}
+        <div class="footer">
+            {% block footer %}{% end %}
+        </div>
+    </div>
+
+    <script src="{{static_url('js/jquery.min.js')}}"></script>
+    <script src="{{static_url('plugins/bootstrap/js/bootstrap.min.js')}}"></script>
+    {% block js_files %}{% end %}
+</body>
+</html>
+
+# 而子模板index.html使用extends来使用父模板base.html，如下：
+{% extends "base.html" %}
+
+{% block page_title %}
+    <title>爱家-房源</title>
+{% end %}
+
+{% block css_files %}
+    <link href="{{static_url('css/index.css')}}" rel="stylesheet">
+{% end %} 
+
+{% block js_files %}
+    <script src="{{static_url('js/index.js')}}"></script>
+{% end %}
+
+{% block header %}
+    <div class="nav-bar">
+        <h3 class="page-title">房 源</h3>
+    </div>
+{% end %}
+
+{% block body %}
+    <ul class="house-list">
+    {% if len(houses) > 0 %}
+        {% for house in houses %}
+        <li class="house-item">
+            <a href=""><img src="/static/images/home01.jpg"></a>
+            <div class="house-desc">
+                <div class="landlord-pic"><img src="/static/images/landlord01.jpg"></div>
+                <div class="house-price">￥<span>{{house["price"]}}</span>/晚</div>
+                <div class="house-intro">
+                    <span class="house-title">{{title_join(house["titles"])}}</span>
+                    <em>整套出租 - {{house["score"]}}分/{{house["comments"]}}点评 - {{house["position"]}}</em>
+                </div>
+            </div>
+        </li>
+        {% end %}
+    {% else %}
+        对不起，暂时没有房源。
+    {% end %}
+    </ul>
+{% end %}
+
+{% block footer %}
+    <p><span><i class="fa fa-copyright"></i></span>爱家租房&nbsp;&nbsp;享受家的温馨</p>
+{% end %}
+
 
 ```
 
-### 176.
+### 188.  数据库
 
 ```python
+# 在Tornado3.0版本以前提供tornado.database模块用来操作MySQL数据库，而从3.0版本开始，此模块就被独立出来，作为torndb包单独提供。torndb只是对MySQLdb的简单封装，不支持Python 3。
+# torndb安装:
+pip install torndb
+
+# 连接初始化:
+# 需要在应用启动时创建一个数据库连接实例，供各个RequestHandler使用。我们可以在构造Application的时候创建一个数据库实例并作为其属性，而RequestHandler可以通过self.application获取其属性，进而操作数据库实例。
+import torndb
+
+class Application(tornado.web.Application):
+    def __init__(self):
+        handlers = [
+            (r"/", IndexHandler),
+        ]
+        settings = dict(
+            template_path=os.path.join(os.path.dirname(__file__), "templates"),
+            static_path=os.path.join(os.path.dirname(__file__), "statics"),
+            debug=True,
+        )
+        super(Application, self).__init__(handlers, **settings)
+        # 创建一个全局mysql连接实例供handler使用
+        self.db = torndb.Connection(
+            host="127.0.0.1",
+            database="pachong",
+            user="root",
+            password="mysql"
+        )
+
+# 使用数据库:
+# 1. 执行语句
+# execute(query, parameters, *kwparameters) 返回影响的最后一条自增字段值
+# execute_rowcount(query, parameters, *kwparameters) 返回影响的行数
+# query为要执行的sql语句，parameters与kwparameters为要绑定的参数，如：
+db.execute("insert into houses(title, position, price, score, comments) values(%s, %s, %s, %s, %s)", "独立装修小别墅", "紧邻文津街", 280, 5, 128)
+或
+db.execute("insert into houses(title, position, price, score, comments) values(%(title)s, %(position)s, %(price)s, %(score)s, %(comments)s)", title="独立装修小别墅", position="紧邻文津街", price=280, score=5, comments=128)
+# 执行语句主要用来执行非查询语句。
+class InsertHandler(RequestHandler):
+    def post(self):
+        title = self.get_argument("title")
+        position = self.get_argument("position")
+        price = self.get_argument("price")
+        score = self.get_argument("score")
+        comments = self.get_argument("comments")
+        try:
+            ret = self.application.db.execute("insert into houses(title, position, price, score, comments) values(%s, %s, %s, %s, %s)", title, position, price, score, comments)
+        except Exception as e:
+            self.write("DB error:%s" % e)
+        else:
+            self.write("OK %d" % ret)
+
+# 2. 查询语句
+# get(query, parameters, *kwparameters) 返回单行结果或None，若出现多行则报错。返回值为torndb.Row类型，是一个类字典的对象，即同时支持字典的关键字索引和对象的属相访问。
+# query(query, parameters, *kwparameters) 返回多行结果，torndb.Row的列表。
+
+# 修改一下index.html模板，将
+<span class="house-title">{{title_join(house["titles"])}}</span>
+# 改为
+<span class="house-title">{{house["title"]}}</span>
+# 添加两个新的handler：
+class GetHandler(RequestHandler):
+    def get(self):
+        """访问方式为http://127.0.0.1/get?id=111"""
+        hid = self.get_argument("id")
+        try:
+            ret = self.application.db.get("select title,position,price,score,comments from houses where id=%s", hid)
+        except Exception as e:
+            self.write("DB error:%s" % e)
+        else:
+            print type(ret)
+            print ret
+            print ret.title
+            print ret['title']
+            self.render("index.html", houses=[ret])
+
+
+class QueryHandler(RequestHandler):
+    def get(self):
+        """访问方式为http://127.0.0.1/query"""
+        try:
+            ret = self.application.db.query("select title,position,price,score,comments from houses limit 10")
+        except Exception as e:
+            self.write("DB error:%s" % e)
+        else:
+            self.render("index.html", houses=ret)
+```
+
+### 189. 安全应用
+
+```python
+# 设置
+set_cookie(name, value, domain=None, expires=None, path='/', expires_days=None)
+# 参数说明：
+# name:cookie名
+# value:cookie值
+# domain:提交cookie时匹配的域名
+# path:提交cookie时匹配的路径
+# expires:cookie的有效期，可以是时间戳整数、时间元组或者datetime类型，为UTC时间
+# expires_days:cookie的有效期，天数，优先级低于expires
+
+# 示例:
+import datetime
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.set_cookie("n1", "v1")
+        self.set_cookie("n2", "v2", path="/new", expires=time.strptime("2016-11-11 23:59:59","%Y-%m-%d %H:%M:%S"))
+        self.set_cookie("n3", "v3", expires_days=20)
+        # 利用time.mktime将本地时间转换为UTC标准时间
+        self.set_cookie("n4", "v4", expires=time.mktime(time.strptime("2016-11-11 23:59:59","%Y-%m-%d %H:%M:%S")))
+        self.write("OK")
+
+# 原理
+# 设置cookie实际就是通过设置header的Set-Cookie来实现的。  
+# 获取
+get_cookie(name, default=None)
+# 获取名为name的cookie，可以设置默认值。
+class IndexHandler(RequestHandler):
+    def get(self):
+        n3 = self.get_cookie("n3")
+        self.write(n3)
+# 清除
+clear_cookie(name, path='/', domain=None)
+
+# 删除名为name，并同时匹配domain和path的cookie。
+
+clear_all_cookies(path='/', domain=None)
+
+# 删除同时匹配domain和path的所有cookie。
+# 示例:
+class ClearOneCookieHandler(RequestHandler):
+    def get(self):
+        self.clear_cookie("n3")
+        self.write("OK")
+
+class ClearAllCookieHandler(RequestHandler):
+    def get(self):
+        self.clear_all_cookies()
+        self.write("OK")
+#   注意：执行清除cookie操作后，并不是立即删除了浏览器中的cookie，而是给cookie值置空，并改变其有效期使其失效。真正的删除cookie是由浏览器去清理的。  
+
+
+# 安全Cookie
+# Cookie是存储在客户端浏览器中的，很容易被篡改。Tornado提供了一种对Cookie进行简易加密签名的方法来防止Cookie被恶意篡改。
+
+# 使用安全Cookie需要为应用配置一个用来给Cookie进行混淆的秘钥cookie_secret，将其传递给Application的构造函数。我们可以使用如下方法来生成一个随机字符串作为cookie_secret的值。
+>>> import base64, uuid
+>>> base64.b64encode(uuid.uuid4().bytes + uuid.uuid4().bytes)
+'2hcicVu+TqShDpfsjMWQLZ0Mkq5NPEWSk9fi0zsSt3A='
+
+# Base64是一种基于64个可打印字符来表示二进制数据的表示方法。由于2的6次方等于64，所以每6个比特为一个单元，对应某个可打印字符。三个字节有24个比特，对应于4个Base64单元，即3个字节需要用4个可打印字符来表示。
+
+# uuid, 通用唯一识别码（英语：Universally Unique Identifier，简称UUID），是由一组32个16进制数字所构成（两个16进制数是一个字节，总共16字节），因此UUID理论上的总数为16^32=2^128，约等于3.4 x 10^38。也就是说若每纳秒产生1兆个UUID，要花100亿年才会将所有UUID用完。
+
+# uuid模块的uuid4()函数可以随机产生一个uuid码，bytes属性将此uuid码作为16字节字符串。
+
+# 将生成的cookie_secret传入Application构造函数：
+app = tornado.web.Application(
+    [(r"/", IndexHandler),],
+    cookie_secret = "2hcicVu+TqShDpfsjMWQLZ0Mkq5NPEWSk9fi0zsSt3A="
+)
+
+# 获取和设置
+set_secure_cookie(name, value, expires_days=30)
+# 设置一个带签名和时间戳的cookie，防止cookie被伪造。
+get_secure_cookie(name, value=None, max_age_days=31)
+# 如果cookie存在且验证通过，返回cookie的值，否则返回None。max_age_day不同于expires_days，expires_days是设置浏览器中cookie的有效期，而max_age_day是过滤安全cookie的时间戳。
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        cookie = self.get_secure_cookie("count")
+        count = int(cookie) + 1 if cookie else 1
+        self.set_secure_cookie("count", str(count))
+        self.write(
+            '<html><head><title>Cookie计数器</title></head>'
+            '<body><h1>您已访问本页%d次。</h1>' % count + 
+            '</body></html>'
+        )
+# 签名后的cookie值：
+"2|1:0|10:1476412069|5:count|4:NQ==|cb5fc1d4434971de6abf87270ac33381c686e4ec8c6f7e62130a0f8cbe5b7609"
+
+
+# 字段说明：
+# 安全cookie的版本，默认使用版本2，不带长度说明前缀
+# 默认为0
+# 时间戳
+# cookie名
+# base64编码的cookie值
+# 签名值，不带长度说明前缀
+
+# 注意：Tornado的安全cookie只是一定程度的安全，仅仅是增加了恶意修改的难度。Tornado的安全cookies仍然容易被窃听，而cookie值是签名不是加密，攻击者能够读取已存储的cookie值，并且可以传输他们的数据到任意服务器，或者通过发送没有修改的数据给应用伪造请求。因此，避免在浏览器cookie中存储敏感的用户数据是非常重要的。
+```
+
+### 190. XSRF 跨站请求伪造
+
+```python
+# 先建立一个网站127.0.0.1:8000，使用上一节中的Cookie计数器：
+class IndexHandler(RequestHandler):
+    def get(self):
+        cookie = self.get_secure_cookie("count")
+        count = int(cookie) + 1 if cookie else 1
+        self.set_secure_cookie("count", str(count))
+        self.write(
+            '<html><head><title>Cookie计数器</title></head>'
+            '<body><h1>您已访问本页%d次。</h1>' % count +
+            '</body></html>'
+        )
+# 再建立一个网站127.0.0.1:9000，
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.write('<html><head><title>被攻击的网站</title></head>'
+        '<body><h1>此网站的图片链接被修改了</h1>'
+        '<img alt="这应该是图片" src="http://127.0.0.1:8000/?f=9000/">'
+        '</body></html>'
+        )
+# 在9000网站模拟攻击者修改了图片源地址为8000网站的Cookie计数器页面网址。当我们访问9000网站的时候，在我们不知道、未授权的情况下8000网站的Cookie被使用了，以至于让8000网址认为是我们自己调用了8000网站的逻辑。这就是CSRF（Cross-site request forgery）跨站请求伪造（跨站攻击或跨域攻击的一种），通常缩写为CSRF或者XSRF。
+
+# 刚刚使用的是GET方式模拟的攻击，为了防范这种方式的攻击，任何会产生副作用的HTTP请求，比如点击购买按钮、编辑账户设置、改变密码或删除文档，都应该使用HTTP POST方法（或PUT、DELETE）。但是，这并不足够：一个恶意站点可能会通过其他手段来模拟发送POST请求，保护POST请求需要额外的策略。
+
+
+# XSRF保护
+# 浏览器有一个很重要的概念——同源策略(Same-Origin Policy)。 所谓同源是指，域名，协议，端口相同。 不同源的客户端脚本(javascript、ActionScript)在没明确授权的情况下，不能读写对方的资源。
+# 由于第三方站点没有访问cookie数据的权限（同源策略），所以我们可以要求每个请求包括一个特定的参数值作为令牌来匹配存储在cookie中的对应值，如果两者匹配，我们的应用认定请求有效。而第三方站点无法在请求中包含令牌cookie值，这就有效地防止了不可信网站发送未授权的请求。
+
+# 开启XSRF保护
+# 要开启XSRF保护，需要在Application的构造函数中添加xsrf_cookies参数：
+app = tornado.web.Application(
+    [(r"/", IndexHandler),],
+    cookie_secret = "2hcicVu+TqShDpfsjMWQLZ0Mkq5NPEWSk9fi0zsSt3A=",
+    xsrf_cookies = True
+)
+# 当这个参数被设置时，Tornado将拒绝请求参数中不包含正确的_xsrf值的POST、PUT和DELETE请求。
+class IndexHandler(RequestHandler):
+    def post(self):
+        self.write("hello itcast")
+# 用不带_xsrf的post请求时，报出了HTTP 403: Forbidden ('_xsrf' argument missing from POST)的错误。
+
+
+# 模板应用
+# 在模板中使用XSRF保护，只需在模板中添加
+{% module xsrf_form_html() %}
+# 新建一个模板index.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>测试XSRF</title>
+</head>
+<body>
+    <form method="post">
+      {% module xsrf_form_html() %}
+      <input type="text" name="message"/>
+      <input type="submit" value="Post"/>
+    </form>
+</body>
+</html>
+# 后端
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.render("index.html")
+
+    def post(self):
+        self.write("hello itcast")
+# 作用:
+# 为浏览器设置了_xsrf的Cookie（注意此Cookie浏览器关闭时就会失效）
+# 为模板的表单中添加了一个隐藏的输入名为_xsrf，其值为_xsrf的Cookie值 
+# 渲染后的页面原码如下：
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>测试XSRF</title>
+    </head>
+    <body>
+        <form method="post">
+            <input type="hidden" name="_xsrf" value="2|543c2206|a056ff9e49df23eaffde0a694cde2b02|1476443353"/>
+            <input type="text" name="message"/>
+            <input type="submit" value="Post"/>
+        </form>
+    </body>
+</html>
+
+
+
+# 非模板应用
+# 对于不使用模板的应用来说，首先要设置_xsrf的Cookie值，可以在任意的Handler中通过获取self.xsrf_token的值来生成_xsrf并设置Cookie。
+# 下面两种方式都可以起到设置_xsrf Cookie的作用。
+class XSRFTokenHandler(RequestHandler):
+    """专门用来设置_xsrf Cookie的接口"""
+    def get(self):
+        self.xsrf_token
+        self.write("Ok")
+
+class StaticFileHandler(tornado.web.StaticFileHandler):
+    """重写StaticFileHandler，构造时触发设置_xsrf Cookie"""
+    def __init__(self, *args, **kwargs):
+        super(StaticFileHandler, self).__init__(*args, **kwargs)
+        self.xsrf_token
+# 对于请求携带_xsrf参数，有两种方式：
+# 若请求体是表单编码格式的，可以在请求体中添加_xsrf参数
+# 若请求体是其他格式的（如json或xml等），可以通过设置HTTP头X-XSRFToken来传递_xsrf值
+# 1. 请求体携带_xsrf参数
+# 新建一个页面xsrf.html：
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>测试XSRF</title>
+</head>
+<body>
+    <a href="javascript:;" onclick="xsrfPost()">发送POST请求</a>
+    <script src="http://cdn.bootcss.com/jquery/3.1.1/jquery.min.js"></script>
+    <script type="text/javascript">
+        //获取指定Cookie的函数
+        function getCookie(name) {
+            var r = document.cookie.match("\\b" + name + "=([^;]*)\\b");
+            return r ? r[1] : undefined;
+        }
+        //AJAX发送post请求，表单格式数据
+        function xsrfPost() {
+            var xsrf = getCookie("_xsrf");
+            $.post("/new", "_xsrf="+xsrf+"&key1=value1", function(data) {
+                alert("OK");
+            });
+        }
+    </script>
+</body>
+</html>
+
+# 2. HTTP头X-XSRFToken
+# 新建一个页面json.html：
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>测试XSRF</title>
+</head>
+<body>
+    <a href="javascript:;" onclick="xsrfPost()">发送POST请求</a>
+    <script src="http://cdn.bootcss.com/jquery/3.1.1/jquery.min.js"></script>
+    <script type="text/javascript">
+        //获取指定Cookie的函数
+        function getCookie(name) {
+            var r = document.cookie.match("\\b" + name + "=([^;]*)\\b");
+            return r ? r[1] : undefined;
+        }
+        //AJAX发送post请求，json格式数据
+        function xsrfPost() {
+            var xsrf = getCookie("_xsrf");
+            var data = {
+                key1:1,
+                key1:2
+            };
+            var json_data = JSON.stringify(data);
+            $.ajax({
+                url: "/new",
+                method: "POST",
+                headers: {
+                    "X-XSRFToken":xsrf,
+                },
+                data:json_data,
+                success:function(data) {
+                    alert("OK");
+                }
+            })
+        }
+    </script>
+</body>
+</html>
+```
+
+### 191. 用户验证
+
+```python
+# 用户验证是指在收到用户请求后进行处理前先判断用户的认证状态（如登陆状态），若通过验证则正常处理，否则强制用户跳转至认证页面（如登陆页面）。
+
+# authenticated装饰器
+# 为了使用Tornado的认证功能，我们需要对登录用户标记具体的处理函数。我们可以使用@tornado.web.authenticated装饰器完成它。当我们使用这个装饰器包裹一个处理方法时，Tornado将确保这个方法的主体只有在合法的用户被发现时才会调用。
+class ProfileHandler(RequestHandler):
+    @tornado.web.authenticated
+    def get(self):
+        self.write("这是我的个人主页。")
+# get_current_user()方法
+# 装饰器@tornado.web.authenticated的判断执行依赖于请求处理类中的self.current_user属性，如果current_user值为假（None、False、0、""等），任何GET或HEAD请求都将把访客重定向到应用设置中login_url指定的URL，而非法用户的POST请求将返回一个带有403（Forbidden）状态的HTTP响应。
+# 在获取self.current_user属性的时候，tornado会调用get_current_user()方法来返回current_user的值。也就是说，我们验证用户的逻辑应写在get_current_user()方法中，若该方法返回非假值则验证通过，否则验证失败。
+class ProfileHandler(RequestHandler):
+    def get_current_user(self):
+        """在此完成用户的认证逻辑"""
+        user_name = self.get_argument("name", None)
+        return user_name 
+
+    @tornado.web.authenticated
+    def get(self):
+        self.write("这是我的个人主页。")
+        
+# login_url设置
+# 当用户验证失败时，将用户重定向到login_url上，所以我们还需要在Application中配置login_url。
+class LoginHandler(RequestHandler):
+    def get(self):
+        """在此返回登陆页面"""
+        self.write("登陆页面")
+
+app = tornado.web.Application(
+    [
+        (r"/", IndexHandler),
+        (r"/profile", ProfileHandler),
+        (r"/login", LoginHandler),
+    ],
+    "login_url":"/login"
+)
+
+# 在login_url后面补充的next参数就是记录的跳转至登录页面前的所在位置，所以我们可以使用next参数来完成登陆后的跳转。
+# 修改登陆逻辑：
+class LoginHandler(RequestHandler):
+    def get(self):
+        """登陆处理，完成登陆后跳转回前一页面"""
+        next = self.get_argument("next", "/")
+        self.redirect(next+"?name=logined")
+        
+```
+
+### 192. 认识异步
+
+```python
+# 1. 同步
+# 模拟两个客户端请求，并依次进行处理：
+# coding:utf-8
+
+def req_a():
+    """模拟请求a"""
+    print '开始处理请求req_a'
+    print '完成处理请求req_a'
+
+def req_b():
+    """模拟请求b"""
+    print '开始处理请求req_b'
+    print '完成处理请求req_b'
+
+def main():
+    """模拟tornado框架，处理两个请求"""
+    req_a()
+    req_b()
+
+if __name__ == "__main__":
+    main()
+    
+    
+#执行结果：
+
+# 开始处理请求req_a
+# 完成处理请求req_a
+# 开始处理请求req_b
+# 完成处理请求req_b
+
+# 同步是按部就班的依次执行，始终按照同一个步调执行，上一个步骤未执行完不会执行下一步。
+# 如果在处理请求req_a时需要执行一个耗时的工作（如IO），其执行过程:
+import time
+
+def long_io():
+    """模拟耗时IO操作"""
+    print "开始执行IO操作"
+    time.sleep(5)
+    print "完成IO操作"
+    return "io result"
+
+def req_a():
+    print "开始处理请求req_a"
+    ret = long_io()
+    print "ret: %s" % ret
+    print "完成处理请求req_a"
+
+def req_b():
+    print "开始处理请求req_b"
+    print "完成处理请求req_b"
+
+def main():
+    req_a()
+    req_b()
+
+if __name__=="__main__":
+    main()
+
+# 执行过程：
+# 开始处理请求req_a
+# 开始执行IO操作
+# 完成IO操作
+# 完成处理请求req_a
+# 开始处理请求req_b
+# 完成处理请求req_b    
+    
+
+# 2. 异步
+# 对于耗时的过程，我们将其交给别人（如其另外一个线程）去执行，而我们继续往下处理，当别人执行完耗时操作后再将结果反馈给我们，这就是我们所说的异步。
+# 使用线程机制来实现异步。
+
+# 2.1 回调写法实现原理
+import time
+import thread
+
+def long_io(callback):
+    """将耗时的操作交给另一线程来处理"""
+    def fun(cb): # 回调函数作为参数
+        """耗时操作"""
+        print "开始执行IO操作"
+        time.sleep(5)
+        print "完成IO操作，并执行回调函数"
+        cb("io result")  # 执行回调函数
+    thread.start_new_thread(fun, (callback,))  # 开启线程执行耗时操作
+
+def on_finish(ret):
+    """回调函数"""
+    print "开始执行回调函数on_finish"
+    print "ret: %s" % ret
+    print "完成执行回调函数on_finish"
+
+def req_a():
+    print "开始处理请求req_a" 
+    long_io(on_finish)
+    print "离开处理请求req_a"
+
+def req_b():
+    print "开始处理请求req_b"
+    time.sleep(2) # 添加此句来突出显示程序执行的过程
+    print "完成处理请求req_b"
+
+def main():
+    req_a()
+    req_b()
+    while 1: # 添加此句防止程序退出，保证线程可以执行完
+        pass
+
+if __name__ == '__main__':
+    main()
+    
+    
+# 执行过程:
+# 开始处理请求req_a
+# 离开处理请求req_a
+# 开始处理请求req_b
+# 开始执行IO操作
+# 完成处理请求req_b
+# 完成IO操作，并执行回调函数
+# 开始执行回调函数on_finish
+# ret: io result
+# 完成执行回调函数on_finish
+
+# 异步的特点是程序存在多个步调，即本属于同一个过程的代码可能在不同的步调上同时执行。
+
+
+# 2.2 协程写法实现原理
+# 在使用回调函数写异步程序时，需将本属于一个执行逻辑（处理请求a）的代码拆分成两个函数req_a和on_finish，这与同步程序的写法相差很大。而同步程序更便于理解业务逻辑，所以能否用同步代码的写法来编写异步程序？
+# 初始版本
+# coding:utf-8
+
+import time
+import thread
+
+gen = None # 全局生成器，供long_io使用
+
+def long_io():
+    def fun():
+        print "开始执行IO操作"
+        global gen
+        time.sleep(5)
+        try:
+            print "完成IO操作，并send结果唤醒挂起程序继续执行"
+            gen.send("io result")  # 使用send返回结果并唤醒程序继续执行
+        except StopIteration: # 捕获生成器完成迭代，防止程序退出
+            pass
+    thread.start_new_thread(fun, ())
+
+def req_a():
+    print "开始处理请求req_a"
+    ret = yield long_io()
+    print "ret: %s" % ret
+    print "完成处理请求req_a"
+
+def req_b():
+    print "开始处理请求req_b"
+    time.sleep(2)
+    print "完成处理请求req_b"
+
+def main():
+    global gen
+    gen = req_a()
+    gen.next() # 开启生成器req_a的执行
+    req_b()
+    while 1:
+        pass
+
+if __name__ == '__main__':
+    main()
+    
+# 执行过程：
+# 开始处理请求req_a
+# 开始处理请求req_b
+# 开始执行IO操作
+# 完成处理请求req_b
+# 完成IO操作，并send结果唤醒挂起程序继续执行
+# ret: io result
+# 完成处理请求req_a
+    
+# 升级版本
+# 上面编写出的版本虽然req_a的编写方式很类似与同步代码，但是在main中调用req_a的时候却不能将其简单的视为普通函数，而是需要作为生成器对待。
+# 现在，试图尝试修改，让req_a与main的编写都类似与同步代码。
+# coding:utf-8
+
+import time
+import thread
+
+gen = None # 全局生成器，供long_io使用
+
+def gen_coroutine(f):
+    def wrapper(*args, **kwargs):
+        global gen
+        gen = f()
+        gen.next()
+    return wrapper
+
+def long_io():
+    def fun():
+        print "开始执行IO操作"
+        global gen
+        time.sleep(5)
+        try:
+            print "完成IO操作，并send结果唤醒挂起程序继续执行"
+            gen.send("io result")  # 使用send返回结果并唤醒程序继续执行
+        except StopIteration: # 捕获生成器完成迭代，防止程序退出
+            pass
+    thread.start_new_thread(fun, ())
+
+@gen_coroutine
+def req_a():
+    print "开始处理请求req_a"
+    ret = yield long_io()
+    print "ret: %s" % ret
+    print "完成处理请求req_a"
+
+def req_b():
+    print "开始处理请求req_b"
+    time.sleep(2)
+    print "完成处理请求req_b"
+
+def main():
+    req_a()
+    req_b()
+    while 1:
+        pass
+
+if __name__ == '__main__':
+    main()
+    
+    
+# 执行过程：
+# 开始处理请求req_a
+# 开始处理请求req_b
+# 开始执行IO操作
+# 完成处理请求req_b
+# 完成IO操作，并send结果唤醒挂起程序继续执行
+# ret: io result
+# 完成处理请求req_a
+
+
+# 最终版本
+# 刚刚完成的版本依然不理想，因为存在一个全局变量gen来供long_io使用。我们现在再次改写程序，消除全局变量gen。
+# coding:utf-8
+
+import time
+import thread
+
+def gen_coroutine(f):
+    def wrapper(*args, **kwargs):
+        gen_f = f()  # gen_f为生成器req_a
+        r = gen_f.next()  # r为生成器long_io
+        def fun(g):
+            ret = g.next() # 执行生成器long_io
+            try:
+                gen_f.send(ret) # 将结果返回给req_a并使其继续执行
+            except StopIteration:
+                pass
+        thread.start_new_thread(fun, (r,))
+    return wrapper
+
+def long_io():
+    print "开始执行IO操作"
+    time.sleep(5)
+    print "完成IO操作，yield回操作结果"
+    yield "io result"
+
+@gen_coroutine
+def req_a():
+    print "开始处理请求req_a"
+    ret = yield long_io()
+    print "ret: %s" % ret
+    print "完成处理请求req_a"
+
+def req_b():
+    print "开始处理请求req_b"
+    time.sleep(2)
+    print "完成处理请求req_b"
+
+def main():
+    req_a()
+    req_b()
+    while 1:
+        pass
+
+if __name__ == '__main__':
+    main()
+    
+# 执行过程：
+# 开始处理请求req_a
+# 开始处理请求req_b
+# 开始执行IO操作
+# 完成处理请求req_b
+# 完成IO操作，yield回操作结果
+# ret: io result
+# 完成处理请求req_a
+
+# 最终版本就是理解Tornado异步编程原理的最简易模型，但是，Tornado实现异步的机制不是线程，而是epoll，即将异步过程交给epoll执行并进行监视回调。
+
+# 需要注意的一点是，实现的版本严格意义上来说不能算是协程，因为两个程序的挂起与唤醒是在两个线程上实现的，而Tornado利用epoll来实现异步，程序的挂起与唤醒始终在一个线程上，由Tornado自己来调度，属于真正意义上的协程。虽如此，并不妨碍理解Tornado异步编程的原理。
+
 
 ```
 
-### 177.
+### 193. Tornado异步
 
 ```python
+# 因为epoll主要是用来解决网络IO的并发问题，所以Tornado的异步编程也主要体现在网络IO的异步上，即异步Web请求。
+
+# 1. tornado.httpclient.AsyncHTTPClient
+# Tornado提供了一个异步Web请求客户端tornado.httpclient.AsyncHTTPClient用来进行异步Web请求。
+# fetch(request, callback=None)
+# 用于执行一个web请求request，并异步返回一个tornado.httpclient.HTTPResponse响应。
+
+# request可以是一个url，也可以是一个tornado.httpclient.HTTPRequest对象。如果是url，fetch会自己构造一个HTTPRequest对象。
+
+# HTTPRequest
+# HTTP请求类，HTTPRequest的构造函数可以接收众多构造参数，最常用的如下：
+#	url (string) – 要访问的url，此参数必传，除此之外均为可选参数
+#	method (string) – HTTP访问方式，如“GET”或“POST”，默认为GET方式
+#	headers (HTTPHeaders or dict) – 附加的HTTP协议头
+#	body – HTTP请求的请求体
+
+
+# HTTPResponse
+# HTTP响应类，其常用属性如下：
+#	code: HTTP状态码，如 200 或 404
+#	reason: 状态码描述信息
+#	body: 响应体字符串
+#	error: 异常（可有可无）
+
+# 2. 测试接口
+# 新浪IP地址库
+#	接口说明
+#	1.请求接口（GET）：
+http://int.dpool.sina.com.cn/iplookup/iplookup.php?format=json&ip=[ip地址字串]
+#	2.响应信息：
+#	（json格式的）国家 、省（自治区或直辖市）、市（县）、运营商
+#	3.返回数据格式：
+{"ret":1,"start":-1,"end":-1,"country":"\u4e2d\u56fd","province":"\u5317\u4eac","city":"\u5317\u4eac","district":"","isp":"","type":"","desc":""}
+
+
+# 3. 回调异步
+class IndexHandler(tornado.web.RequestHandler):
+    @tornado.web.asynchronous  # 不关闭连接，也不发送响应
+    def get(self):
+        http = tornado.httpclient.AsyncHTTPClient()
+        http.fetch("http://int.dpool.sina.com.cn/iplookup/iplookup.php?format=json&ip=14.130.112.24",
+                   callback=self.on_response)
+
+    def on_response(self, response):
+        if response.error:
+            self.send_error(500)
+        else:
+            data = json.loads(response.body)
+            if 1 == data["ret"]:
+                self.write(u"国家：%s 省份: %s 城市: %s" % (data["country"], data["province"], data["city"]))
+            else:
+                self.write("查询IP信息错误")
+        self.finish() # 发送响应信息，结束请求处理
+
+
+# tornado.web.asynchronous
+# 此装饰器用于回调形式的异步方法，并且应该仅用于HTTP的方法上（如get、post等）。
+
+# 此装饰器不会让被装饰的方法变为异步，而只是告诉框架被装饰的方法是异步的，当方法返回时响应尚未完成。只有在request handler调用了finish方法后，才会结束本次请求处理，发送响应。
+
+# 不带此装饰器的请求在get、post等方法返回时自动完成结束请求处理。
+
+
+# 4. 协程异步
+# 上一节中封装的装饰器get_coroutine在Tornado中对应的是tornado.gen.coroutine。
+class IndexHandler(tornado.web.RequestHandler):
+    @tornado.gen.coroutine
+    def get(self):
+        http = tornado.httpclient.AsyncHTTPClient()
+        response = yield http.fetch("http://int.dpool.sina.com.cn/iplookup/iplookup.php?format=json&ip=14.130.112.24")
+        if response.error:
+            self.send_error(500)
+        else:
+            data = json.loads(response.body)
+            if 1 == data["ret"]:
+                self.write(u"国家：%s 省份: %s 城市: %s" % (data["country"], data["province"], data["city"]))
+            else:
+                self.write("查询IP信息错误")
+                
+# 也可以将异步Web请求单独出来：
+class IndexHandler(tornado.web.RequestHandler):
+    @tornado.gen.coroutine
+    def get(self):
+        rep = yield self.get_ip_info("14.130.112.24")
+        if 1 == rep["ret"]:
+            self.write(u"国家：%s 省份: %s 城市: %s" % (rep["country"], rep["province"], rep["city"]))
+        else:
+            self.write("查询IP信息错误")
+
+    @tornado.gen.coroutine
+    def get_ip_info(self, ip):
+        http = tornado.httpclient.AsyncHTTPClient()
+        response = yield http.fetch("http://int.dpool.sina.com.cn/iplookup/iplookup.php?format=json&ip=" + ip)
+        if response.error:
+            rep = {"ret:0"}
+        else:
+            rep = json.loads(response.body)
+        raise tornado.gen.Return(rep)  # 此处需要注意
+        
+# 代码中我们需要注意的地方是get_ip_info返回值的方式，在python 2中，使用了yield的生成器可以使用不返回任何值的return，但不能return value，因此Tornado为我们封装了用于在生成器中返回值的特殊异常tornado.gen.Return，并用raise来返回此返回值。
+
+
+# 并行协程
+# Tornado可以同时执行多个异步，并发的异步可以使用列表或字典，如下：
+class IndexHandler(tornado.web.RequestHandler):
+    @tornado.gen.coroutine
+    def get(self):
+        ips = ["14.130.112.24",
+            "15.130.112.24",
+            "16.130.112.24",
+            "17.130.112.24"]
+        rep1, rep2 = yield [self.get_ip_info(ips[0]), self.get_ip_info(ips[1])]
+        rep34_dict = yield dict(rep3=self.get_ip_info(ips[2]), rep4=self.get_ip_info(ips[3]))
+        self.write_response(ips[0], rep1) 
+        self.write_response(ips[1], rep2) 
+        self.write_response(ips[2], rep34_dict['rep3']) 
+        self.write_response(ips[3], rep34_dict['rep4']) 
+
+    def write_response(self, ip, response):
+        self.write(ip) 
+        self.write(":<br/>") 
+        if 1 == response["ret"]:
+            self.write(u"国家：%s 省份: %s 城市: %s<br/>" % (response["country"], response["province"], response["city"]))
+        else:
+            self.write("查询IP信息错误<br/>")
+
+    @tornado.gen.coroutine
+    def get_ip_info(self, ip):
+        http = tornado.httpclient.AsyncHTTPClient()
+        response = yield http.fetch("http://int.dpool.sina.com.cn/iplookup/iplookup.php?format=json&ip=" + ip)
+        if response.error:
+            rep = {"ret:1"}
+        else:
+            rep = json.loads(response.body)
+        raise tornado.gen.Return(rep)
+        
+# 5. 关于数据库的异步说明
+# 网站基本都会有数据库操作，而Tornado是单线程的，这意味着如果数据库查询返回过慢，整个服务器响应会被堵塞。
+
+# 数据库查询，实质上也是远程的网络调用；理想情况下，是将这些操作也封装成为异步的；但Tornado对此并没有提供任何支持。
+
+# 这是Tornado的设计，而不是缺陷。
+
+# 一个系统，要满足高流量；是必须解决数据库查询速度问题的！
+
+# 数据库若存在查询性能问题，整个系统无论如何优化，数据库都会是瓶颈，拖慢整个系统！
+
+# 异步并不能从本质上提到系统的性能；它仅仅是避免多余的网络响应等待，以及切换线程的CPU耗费。
+
+# 如果数据库查询响应太慢，需要解决的是数据库的性能问题；而不是调用数据库的前端Web应用。
+
+# 对于实时返回的数据查询，理想情况下需要确保所有数据都在内存中，数据库硬盘IO应该为0；这样的查询才能足够快；而如果数据库查询足够快，那么前端web应用也就无将数据查询封装为异步的必要。
+
+# 就算是使用协程，异步程序对于同步程序始终还是会提高复杂性；需要衡量的是处理这些额外复杂性是否值得。
+
+# 如果后端有查询实在是太慢，无法绕过，Tornaod的建议是将这些查询在后端封装独立封装成为HTTP接口，然后使用Tornado内置的异步HTTP客户端进行调用。
+        
+```
+
+### 194. WebSocket
+
+```python
+# WebSocket是HTML5规范中新提出的客户端-服务器通讯协议，协议本身使用新的ws://URL格式。
+
+# WebSocket 是独立的、创建在 TCP 上的协议，和 HTTP 的唯一关联是使用 HTTP 协议的101状态码进行协议切换，使用的 TCP 端口是80，可以用于绕过大多数防火墙的限制。
+
+# WebSocket 使得客户端和服务器之间的数据交换变得更加简单，允许服务端直接向客户端推送数据而不需要客户端进行请求，两者之间可以创建持久性的连接，并允许数据进行双向传送。
+
+# 目前常见的浏览器如 Chrome、IE、Firefox、Safari、Opera 等都支持 WebSocket，同时需要服务端程序支持 WebSocket。
+
+
+# 1. Tornado的WebSocket模块
+# ornado提供支持WebSocket的模块是tornado.websocket，其中提供了一个WebSocketHandler类用来处理通讯。
+WebSocketHandler.open()  # 当一个WebSocket连接建立后被调用。
+WebSocketHandler.on_message(message)  # 当客户端发送消息message过来时被调用，注意此方法必须被重写。
+WebSocketHandler.on_close()  #  当WebSocket连接关闭后被调用。
+WebSocketHandler.write_message(message, binary=False) # 向客户端发送消息messagea，message可以是字符串或字典（字典会被转为json字符串）。若binary为False，则message以utf8编码发送；二进制模式（binary=True）时，可发送任何字节码。
+WebSocketHandler.close()  # 关闭WebSocket连接。
+WebSocketHandler.check_origin(origin)  # 判断源origin，对于符合条件（返回判断结果为True）的请求源origin允许其连接，否则返回403。可以重写此方法来解决WebSocket的跨域请求（如始终return True）。
+
+
+# 2. 前端JavaScript编写
+# 在前端JS中使用WebSocket与服务器通讯的常用方法如下：
+var ws = new WebSocket("ws://127.0.0.1:8888/websocket"); // 新建一个ws连接
+ws.onopen = function() {  // 连接建立好后的回调
+   ws.send("Hello, world");  // 向建立的连接发送消息
+};
+ws.onmessage = function (evt) {  // 收到服务器发送的消息后执行的回调
+   alert(evt.data);  // 接收的消息内容在事件参数evt的data属性中
+};
+
+#  3. 在线聊天室的小Demo
+# 后端代码 server.py
+# coding:utf-8
+
+import tornado.web
+import tornado.ioloop
+import tornado.httpserver
+import tornado.options
+import os
+import datetime
+
+from tornado.web import RequestHandler
+from tornado.options import define, options
+from tornado.websocket import WebSocketHandler
+
+define("port", default=8000, type=int)
+
+class IndexHandler(RequestHandler):
+    def get(self):
+        self.render("index.html")
+
+class ChatHandler(WebSocketHandler):
+
+    users = set()  # 用来存放在线用户的容器
+
+    def open(self):
+        self.users.add(self)  # 建立连接后添加用户到容器中
+        for u in self.users:  # 向已在线用户发送消息
+            u.write_message(u"[%s]-[%s]-进入聊天室" % (self.request.remote_ip, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+    def on_message(self, message):
+        for u in self.users:  # 向在线用户广播消息
+            u.write_message(u"[%s]-[%s]-说：%s" % (self.request.remote_ip, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message))
+
+    def on_close(self):
+        self.users.remove(self) # 用户关闭连接后从容器中移除用户
+        for u in self.users:
+            u.write_message(u"[%s]-[%s]-离开聊天室" % (self.request.remote_ip, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+    def check_origin(self, origin):
+        return True  # 允许WebSocket的跨域请求
+
+if __name__ == '__main__':
+    tornado.options.parse_command_line()
+    app = tornado.web.Application([
+            (r"/", IndexHandler),
+            (r"/chat", ChatHandler),
+        ],
+        static_path = os.path.join(os.path.dirname(__file__), "static"),
+        template_path = os.path.join(os.path.dirname(__file__), "template"),
+        debug = True
+        )
+    http_server = tornado.httpserver.HTTPServer(app)
+    http_server.listen(options.port)
+    tornado.ioloop.IOLoop.current().start()
+    
+# 前端代码index.html
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>聊天室</title>
+</head>
+<body>
+    <div id="contents" style="height:500px;overflow:auto;"></div>
+    <div>
+        <textarea id="msg"></textarea>
+        <a href="javascript:;" onclick="sendMsg()">发送</a>
+    </div>
+    <script src="{{static_url('js/jquery.min.js')}}"></script>
+    <script type="text/javascript">
+        var ws = new WebSocket("ws://192.168.114.177:8000/chat");
+        ws.onmessage = function(e) {
+            $("#contents").append("<p>" + e.data + "</p>");
+        }
+        function sendMsg() {
+            var msg = $("#msg").val();
+            ws.send(msg);
+            $("#msg").val("");
+        }
+    </script>
+</body>
+</html>
 
 ```
 
-### 178.
+### 195. 部署Tornado
 
 ```python
+# 为了充分利用多核CPU，并且为了减少同步代码中的阻塞影响，在部署Tornado的时候需要开启多个进程（最好为每个CPU核心开启一个进程）
+
+# 因为Tornado自带的服务器性能很高，所以我们只需开启多个Tornado进程。为了对外有统一的接口，并且可以分发用户的请求到不同的Tornado进程上，用Nginx来进行代理。
+
+# 1. supervisor
+# 为了统一管理Tornado的多个进程，可以借助supervisor工具。
+
+# 安装
+sudo pip install supervisor
+
+# 配置
+# 运行echo_supervisord_conf命令输出默认的配置项，可以如下操作将默认配置保存到文件中
+echo_supervisord_conf > supervisord.conf
+
+# 打开编辑supervisord.conf文件，修改
+[include]
+files = relative/directory/*.ini
+# 为:
+[include]
+files = /etc/supervisor/*.conf
+
+# include选项指明包含的其他配置文件。
+# 将编辑后的supervisord.conf文件复制到/etc/目录下
+sudo cp supervisord.conf /etc/
+
+# 然后在/etc目录下新建子目录supervisor（与配置文件里的选项相同），并在/etc/supervisor/中新建tornado管理的配置文件tornado.conf。
+[group:tornadoes]
+programs=tornado-8000,tornado-8001,tornado-8002,tornado-8003
+
+[program:tornado-8000]
+command=/home/python/.virtualenvs/tornado_py2/bin/python /home/python/Documents/demo/chat/server.py --port=8000
+directory=/home/python/Documents/demo/chat
+user=python
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/home/python/tornado.log
+loglevel=info
+
+[program:tornado-8001]
+command=/home/python/.virtualenvs/tornado_py2/bin/python /home/python/Documents/demo/chat/server.py --port=8001
+directory=/home/python/Documents/demo/chat
+user=python
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/home/python/tornado.log
+loglevel=info
+
+[program:tornado-8002]
+command=/home/python/.virtualenvs/tornado_py2/bin/python /home/python/Documents/demo/chat/server.py --port=8002
+directory=/home/python/Documents/demo/chat
+user=python
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/home/python/tornado.log
+loglevel=info
+
+[program:tornado-8003]
+command=/home/python/.virtualenvs/tornado_py2/bin/python /home/python/Documents/demo/chat/server.py --port=8003
+directory=/home/python/Documents/demo/chat
+user=python
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/home/python/tornado.log
+loglevel=info
+
+
+# 启动
+supervisord -c /etc/supervisord.conf
+# 查看 supervisord 是否在运行：
+ps aux | grep supervisord
+
+
+# supervisorctl
+# 可以利用supervisorctl来管理supervisor。
+supervisorctl
+
+> status    # 查看程序状态
+> stop tornadoes:*   # 关闭 tornadoes组 程序
+> start tornadoes:*  # 启动 tornadoes组 程序
+> restart tornadoes:*    # 重启 tornadoes组 程序
+> update    ＃ 重启配置文件修改过的程序
+
+# 执行status命令时，显示如下信息说明tornado程序运行正常：
+supervisor> status
+tornadoes:tornado-8000 RUNNING pid 32091, uptime 00:00:02
+tornadoes:tornado-8001 RUNNING pid 32092, uptime 00:00:02
+tornadoes:tornado-8002 RUNNING pid 32093, uptime 00:00:02
+tornadoes:tornado-8003 RUNNING pid 32094, uptime 00:00:02
+            
+
+            
+# 2. nginx
+# 对于使用ubuntu apt-get 安装nginx，其配置文件位于/etc/nginx/sites-available中，修改default文件如下：
+upstream tornadoes {
+    server 127.0.0.1:8000;
+    server 127.0.0.1:8001;
+    server 127.0.0.1:8002;
+    server 127.0.0.1:8003;
+}
+
+upstream websocket {
+    server 127.0.0.1:8000;
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    location /static/ {
+        root /home/python/Documents/demo/chat;
+        if ($query_string) {
+            expires max;
+        }
+    }
+
+    location /chat {
+        proxy_pass http://websocket/chat;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location / {
+        proxy_pass_header Server;
+        proxy_set_header Host $http_host;
+        proxy_redirect off;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Scheme $scheme;  # 协议 http https
+        proxy_pass http://tornadoes;
+    }
+}
+
+# 启动nginx
+service nginx start   # 启动
+service nginx stop    # 停止
+service nginx restart # 重启
+
+
+# 源码安装版本
+启动：sudo sbin/nginx
+停止：sudo sbin/nginx -s stop
+重启：sudo sbin/nginx -s reload
+```
+
+## 十二  Shell与运维
+
+### 196. 什么是运维
+
+```python
+# IDC--（Internet Data Center)互联网数据中心，主要服务包括整机租用、服务器托管、机柜租用、机房租用、专线接入和网络管理服务等。广义上的IDC业务，实际上就是数据中心所提供的一切服务。客户租用数据中心的服务器和带宽，并利用数据中心的技术力量，来实现自己对软、硬件的要求，搭建自己的互联网平台，享用数据中心所提供的一系列服务。
+# ISP--(Internet Service Provider)互联网服务提供商，即向广大用户综合提供互联网接入业务、信息业务、和增值业务的电信运营商。
+# ICP--(Internet Content Provider)互联网内容提供商，向广大用户综合提供互联网信息业务和增值业务的电信运营商。 根据中华人民共和国国务院令第292号《互联网信息服务管理办法》规定，国家对提供互联网信息服务的ICP实行许可证制度。从而，ICP证成为网站经营的许可证，经营性网站必须办理ICP证，否则就属于非法经营。因此，办理ICP证是企业网站合法经营的需要.
+# CDN--(Content Delivery Network)内容分发网络,依靠部署在各地的边缘服务器，通过中心平台的负载均衡、内容分发、调度等功能模块，使用户就近获取所需内容，降低网络拥塞，提高用户访问响应速度和命中率。CDN的关键技术主要有内容存储和分发技术。 CDN的基本原理是广泛采用各种缓存服务器，将这些缓存服务器分布到用户访问相对集中的地区或网络中，在用户访问网站时，利用全局负载技术将用户的访问指向距离最近的工作正常的缓存服务器上，由缓存服务器直接响应用户请求。
+# LVS--(Linux Virtual Server)的简写，意即Linux虚拟服务器，是一个虚拟的服务器集群系统。LVS集群采用IP负载均衡技术和基于内容请求分发技术。调度器具有很好的吞吐率，将请求均衡地转移到不同的服务器上执行，且调度器自动屏蔽掉服务器的故障，从而将一组服务器构成一个高性能的、高可用的虚拟服务器。整个服务器集群的结构对客户是透明的，而且无需修改客户端和服务器端的程序。为此，在设计时需要考虑系统的透明性、可伸缩性、高可用性和易管理性。
+# CGI--(Common Gateway Interface)通用网关接口。CGI规范允许Web服务器执行外部程序，并将它们的输出发送给Web浏览器，CGI将Web的一组简单的静态超媒体文档变成一个完整的新的交互式媒体
+
+# GSLB--(Global Server Load Balance，全局负载均衡）作为 CDN 系统架构中最核心的部分，负责流量调度.基于DNS的GSLB 绝大部分使用负载均衡技术的应用都通过域名来访问目的主机，在用户发出任何应用连接请求时，首先必须通过DNS请求获得服务器的IP地址，基于DNS的GSLB正是在返回DNS解析结果的过程中进行智能决策，给用户返回一个最佳的服务IP。用户应用流程与没有GSLB时未发生任何变化。这也是市场上主流的GSLB技术。
+
+# BOSS--(Business & Operation Support System，BOSS)是业务运营支撑系统。通常所说的BOSS分为四个部分：计费及结算系统、营业与账务系统、客户服务系统和决策支持系统。BOSS从业务层面来看就是一个框架，来承载业务系统、CRM系统、计费系统。实现统一框架中的纵向、横向管理。该系统最早由电信部门的计费系统发展演变而来，基本功能包括客户资料管理、产品管理、用户订购管理、计费、出帐、结算等，负责登记客户资料、管理用户订购服务的提供、实时的根据不同产品、套餐的资费标准计算业务（手机、固定电话用户通话时、点播收视、宽带流量与时间等）的消费金额，准实时及定期计算用户帐单，实时或定期结算用户各种消费费用。
+
+# 管理:
+# 配置管理
+# 事件管理
+# 问题管理
+# 成本管理
+# 容量管理
+# 资源管理
+# 需求管理
+
+# 规划:
+# 架构规划
+# IDC规划
+# 服务器规划
+# ISP规划
+# 预算规划
+
+# 优化:
+# 速度优化
+# 成本优化
+# ISP优化
+# CDN优化
+# 告警优化
+# 故障预案
+# 故障演习
+
+# 安全:
+# 漏洞扫描
+# 域名劫持扫描
+# 挂马扫描
+# CGI扫描
+# 网页篡改扫描
+
+# 告警:
+# 告警模型
+# 告警故障
+# 告警统计
+# 告警关联
+# 拨测
+	#	定时curl一下某个url，有问题就告警.
+	#	日志告警：5分钟Error大于xxx次告警。
+	#	指标告警：cpu使用率大于xxx告警。
+    
+# 告警对象可以分为两种：
+# 业务规则监控
+# 系统可靠性监控
+# 对于业务规则监控可以举一个游戏的例子。比如游戏角色在一定装备的情况下，单次打击的伤害输出应该是有一个上限，如果超过了就说明有作弊的情况。又比如斗地主游戏里一个人的连胜场次是有一定上限的，每天的胜率是有一定上限，如果超出平均值太多就可能是作弊。业务规则监控的不是硬件，也不是软件是否工作正常。而是软件是否按照业务规则实现的，是否有漏洞。也可以理解为对“正确性”的监控。
+
+# 系统可靠性监控是最常见的监控形式，比如发现是不是服务器挂掉了，服务是不是过载了等等。对于大部分后台服务，系统可以抽象建模成这个样子：
+# 监控:
+    # URL监控
+    # LVS监控
+    # IDC监控
+    # 数据库监控
+    # 模块监控
+    # 站点监控
+    # 响应监控
+# 系统/平台:
+    # CDN平台
+    # 静态应用平台
+    # 动态应用平台
+    # 点击流系统
+    # 数据库平台
+    # 下载平台
+    # 网络健康系统
+    # 经营分析系统
+    # 存储平台
+    # 流媒体平台
+    # 质量监测系统
+    # GSLB管理系统
+    # BOSS系统
+    # 立体监控系统
+    # 自动发布系统
+    # 站点分析系统
+    # 统一告警系统
+    # 运维工具系统
+# 规范:
+    # 项目立项规范
+    # 运营故障分级和处罚规范
+    # 重大运营故障处理流程
+    # 环境一致性规范
+    # 运营资源申请流程
+    # IDC变更流程
+    # 预算管理规范
+# linux发行版本:
+    # RedHat: Fedora, CentOS, Mandriva
+    # SuSE: SLES, OpenSuSE
+    # Debian: Ubuntu
+    # Gentoo:
+    # BackTrace/kali linux (黑客)
+```
+
+### 197. Shell编程
+
+```python
+# shell历史 
+
+Shell的作用是解释执行用户的命令，用户输入一条命令，Shell就解释执行一条，这种方式称为交互式（Interactive），Shell还有一种执行命令的方式称为批处理（Batch），用户事先写一个Shell脚本（Script），其中有很多条命令，让Shell一次把这些命令执行完，而不必一条一条地敲命令。Shell脚本和编程语言很相似，也有变量和流程控制语句，但Shell脚本是解释执行的，不需要编译，Shell程序从脚本中一行一行读取并执行这些命令，相当于一个用户把脚本中的命令一行一行敲到Shell提示符下执行。
+
+由于历史原因，UNIX系统上有很多种Shell：
+
+1.sh（Bourne Shell）：由Steve Bourne开发，各种UNIX系统都配有sh。
+
+2.csh（C Shell）：由Bill Joy开发，随BSD UNIX发布，它的流程控制语句很像C语言，支持很多Bourne Shell所不支持的功能：作业控制，命令历史，命令行编辑。
+
+3.ksh（Korn Shell）：由David Korn开发，向后兼容sh的功能，并且添加了csh引入的新功能，是目前很多UNIX系统标准配置的Shell，在这些系统上/bin/sh往往是指向/bin/ksh的符号链接。
+
+4.tcsh（TENEX C Shell）：是csh的增强版本，引入了命令补全等功能，在FreeBSD、Mac OS X等系统上替代了csh。
+
+5.bash（Bourne Again Shell）：由GNU开发的Shell，主要目标是与POSIX标准保持一致，同时兼顾对sh的兼容，bash从csh和ksh借鉴了很多功能，是各种Linux发行版标准配置的Shell，在Linux系统上/bin/sh往往是指向/bin/bash的符号链接。虽然如此，bash和sh还是有很多不同的，一方面，bash扩展了一些命令和参数，另一方面，bash并不完全和sh兼容，有些行为并不一致，所以bash需要模拟sh的行为：当我们通过sh这个程序名启动bash时，bash可以假装自己是sh，不认扩展的命令，并且行为与sh保持一致。
+
+6.zsh 的命令补全功能非常强大，可以补齐路径，补齐命令，补齐参数等。
+
+vim /etc/passwd
+其中最后一列显示了用户对应的shell类型
+
+root:x:0:0:root:/root:/bin/bash
+nobody:x:65534:65534:nobody:/nonexistent:/bin/sh
+syslog:x:101:103::/home/syslog:/bin/false
+itcast:x:1000:1000:itcast,,,:/home/itcast:/bin/bash
+ftp:x:115:125:ftp daemon,,,:/srv/ftp:/bin/false
+                        
+用户在命令行输入命令后，一般情况下Shell会fork并exec该命令，但是Shell的内建命令例外，执行内建命令相当于调用Shell进程中的一个函数，并不创建新的进程。以前学过的cd、alias、umask、exit等命令即是内建命令，凡是用which命令查不到程序文件所在位置的命令都是内建命令，内建命令没有单独的man手册，要在man手册中查看内建命令，应该
+$ man bash-builtins
+如export、shift、if、eval、[、for、while等等。内建命令虽然不创建新的进程，但也会有Exit Status，通常也用0表示成功非零表示失败，虽然内建命令不创建新的进程，但执行结束后也会有一个状态码，也可以用特殊变量$?读出。
+```
+
+### 198. 执行脚本
+
+```shell
+# 编写一个简单的脚本test.sh：
+#! /bin/sh
+cd ..
+ls
+# Shell脚本中用#表示注释，相当于C语言的//注释。但如果#位于第一行开头，并且是#!（称为Shebang）则例外，它表示该脚本使用后面指定的解释器/bin/sh解释执行。如果把这个脚本文件加上可执行权限然后执行：
+chmod a+x test.sh
+./test.sh
+# Shell会fork一个子进程并调用exec执行./test.sh这个程序，exec系统调用应该把子进程的代码段替换成./test.sh程序的代码段，并从它的_start开始执行。然而test.sh是个文本文件，根本没有代码段和_start函数，怎么办呢？其实exec还有另外一种机制，如果要执行的是一个文本文件，并且第一行用Shebang指定了解释器，则用解释器程序的代码段替换当前进程，并且从解释器的_start开始执行，而这个文本文件被当作命令行参数传给解释器。因此，执行上述脚本相当于执行程序
+$ /bin/sh ./test.sh
+# 以这种方式执行不需要test.sh文件具有可执行权限。
+
+# 如果将命令行下输入的命令用()括号括起来，那么也会fork出一个子Shell执行小括号中的命令，一行中可以输入由分号;隔开的多个命令，比如：
+$ (cd ..;ls -l)
+# 和上面两种方法执行Shell脚本的效果是相同的，cd ..命令改变的是子Shell的PWD，而不会影响到交互式Shell。然而命令
+$ cd ..;ls -l
+# 则有不同的效果，cd ..命令是直接在交互式Shell下执行的，改变交互式Shell的PWD，然而这种方式相当于这样执行Shell脚本：
+$ source ./test.sh
+# 或者
+$ . ./test.sh
+# source或者.命令是Shell的内建命令，这种方式也不会创建子Shell，而是直接在交互式Shell下逐行执行脚本中的命令。
+```
+
+### 199. 基本语法--变量
+
+```shell
+按照惯例，Shell变量由全大写字母加下划线组成，有两种类型的Shell变量：
+
+1.环境变量
+
+环境变量可以从父进程传给子进程，因此Shell进程的环境变量可以从当前Shell进程传给fork出来的子进程。用printenv命令可以显示当前Shell进程的环境变量。
+
+2.本地变量
+
+# 只存在于当前Shell进程，用set命令可以显示当前Shell进程中定义的所有变量（包括本地变量和环境变量）和函数。
+
+# 环境变量是任何进程都有的概念，而本地变量是Shell特有的概念。在Shell中，环境变量和本地变量的定义和用法相似。在Shell中定义或赋值一个变量：
+
+itcast$ VARNAME=value
+# 注意等号两边都不能有空格，否则会被Shell解释成命令和命令行参数。
+
+# 一个变量定义后仅存在于当前Shell进程，它是本地变量，用export命令可以把本地变量导出为环境变量，定义和导出环境变量通常可以一步完成：
+
+itcast$ export VARNAME=value
+# 也可以分两步完成：
+
+itcast$ VARNAME=value
+itcast$ export VARNAME
+# 用unset命令可以删除已定义的环境变量或本地变量。
+
+itcast$ unset VARNAME
+# 如果一个变量叫做VARNAME，用${VARNAME}可以表示它的值，在不引起歧义的情况下也可以用$VARNAME表示它的值。通过以下例子比较这两种表示法的不同：
+
+itcast$ echo $SHELL
+# 注意，在定义变量时不用$，取变量值时要用$。和C语言不同的是，Shell变量不需要明确定义类型，事实上Shell变量的值都是字符串，比如我们定义VAR=45，其实VAR的值是字符串45而非整数。Shell变量不需要先定义后使用，如果对一个没有定义的变量取值，则值为空字符串。
+```
+
+### 200. 基本语法--文件名代换（Globbing）：* ? []
+
+```shell
+# 这些用于匹配的字符称为通配符（Wildcard），具体如下：
+# 通配符
+
+*   # 匹配0个或多个任意字符
+?   # 匹配一个任意字符
+[若干字符]  # 匹配方括号中任意一个字符的一次出现
+
+$ ls /dev/ttyS*
+$ ls ch0?.doc
+$ ls ch0[0-2].doc
+$ ls ch[012]   [0-9].doc
+# 注意，Globbing所匹配的文件名是由Shell展开的，也就是说在参数还没传给程序之前已经展开了，比如上述ls ch0[012].doc命令，如果当前目录下有ch00.doc和ch02.doc，则传给ls命令的参数实际上是这两个文件名，而不是一个匹配字符串。
+```
+
+###201. 基本语法--命令代换：`或 $()
+
+```shell
+# 由'`'反引号括起来的也是一条命令，Shell先执行该命令，然后将输出结果立刻代换到当前命令行中。例如定义一个变量存放date命令的输出：
+itcast$ DATE=`date`
+itcast$ echo $DATE
+# 命令代换也可以用$()表示：
+itcast$ DATE=$(date)
+```
+
+### 202. 基本语法--算术代换：$(())
+
+```shell
+# 用于算术计算，$(())中的Shell变量取值将转换成整数，同样含义的$[]等价例如：
+itcast$ VAR=45
+itcast$ echo $(($VAR+3))
+# $(())中只能用+-*/和()运算符，并且只能做整数运算。
+
+$[base#n],其中base表示进制,n按照base进制解释，后面再有运算数，按十进制解释。
+
+echo $[2#10+11]
+echo $[8#10+11]
+echo $[10#10+11]
+```
+
+### 203. 基本语法--转义字符\
+
+```shell
+# 和C语言类似，\在Shell中被用作转义字符，用于去除紧跟其后的单个字符的特殊意义（回车除外），换句话说，紧跟其后的字符取字面值。例如：
+itcast$ echo $SHELL
+/bin/bash
+itcast$ echo \$SHELL
+$SHELL
+itcast$ echo \\
+\
+# 比如创建一个文件名为“$ $”的文件可以这样：
+itcast$ touch \$\ \$
+# 还有一个字符虽然不具有特殊含义，但是要用它做文件名也很麻烦，就是-号。如果要创建一个文件名以-号开头的文件，这样是不行的：
+itcast$ touch -hello
+touch: invalid option -- h
+Try `touch --help' for more information.
+
+# 即使加上\转义也还是报错：
+
+itcast$ touch \-hello
+touch: invalid option -- h
+Try `touch --help' for more information.
+# 因为各种UNIX命令都把-号开头的命令行参数当作命令的选项，而不会当作文件名。如果非要处理以-号开头的文件名，可以有两种办法：
+itcast$ touch ./-hello
+# 或
+itcast$ touch -- -hello
+# \还有一种用法，在\后敲回车表示续行，Shell并不会立刻执行命令，而是把光标移到下一行，给出一个续行提示符>，等待用户继续输入，最后把所有的续行接到一起当作一个命令执行。例如：
+itcast$ ls \
+> -l
+（ls -l命令的输出）
+```
+
+### 204. 基本语法--单引号
+
+```shell
+# 和C语言不一样，Shell脚本中的单引号和双引号一样都是字符串的界定符（双引号下一节介绍），而不是字符的界定符。单引号用于保持引号内所有字符的字面值，即使引号内的\和回车也不例外，但是字符串中不能出现单引号。如果引号没有配对就输入回车，Shell会给出续行提示符，要求用户把引号配上对。例如：
+itcast$ echo '$SHELL'
+$SHELL
+itcast$ echo 'ABC\（回车）
+> DE'（再按一次回车结束命令）
+ABC\
+DE
+```
+
+###205. 基本语法--双引号
+
+```shell
+# 被双引号用括住的内容，将被视为单一字串。它防止通配符扩展，但允许变量扩展。这点与单引号的处理方式不同
+itcast$ DATE=$(date)
+itcast$ echo "$DATE"
+itcast$ echo '$DATE'
+```
+
+### 206. 脚本语法--条件测试：test [
+
+```shell
+# 命令test或[可以测试一个条件是否成立，如果测试结果为真，则该命令的Exit Status为0，如果测试结果为假，则命令的Exit Status为1（注意与C语言的逻辑表示正好相反）。例如测试两个数的大小关系：
+itcast@ubuntu:~$ var=2
+itcast@ubuntu:~$ test $var -gt 1
+itcast@ubuntu:~$ echo $?
+0
+itcast@ubuntu:~$ test $var -gt 3
+itcast@ubuntu:~$ echo $?
+1
+itcast@ubuntu:~$ [ $var -gt 3 ]
+itcast@ubuntu:~$ echo $?
+1
+itcast@ubuntu:~$
+# 虽然看起来很奇怪，但左方括号[确实是一个命令的名字，传给命令的各参数之间应该用空格隔开，比如，$VAR、-gt、3、]是[命令的四个参数，它们之间必须用空格隔开。命令test或[的参数形式是相同的，只不过test命令不需要]参数。以[命令为例，常见的测试命令如下表所示：
+[ -d DIR ]              如果DIR存在并且是一个目录则为真
+[ -f FILE ]             如果FILE存在且是一个普通文件则为真
+[ -z STRING ]           如果STRING的长度为零则为真
+[ -n STRING ]           如果STRING的长度非零则为真
+[ STRING1 = STRING2 ]   如果两个字符串相同则为真
+[ STRING1 != STRING2 ]  如果字符串不相同则为真
+[ ARG1 OP ARG2 ]        ARG1和ARG2应该是整数或者取值为整数的变量，OP是-eq（等于）-ne（不等于）-lt（小于）-le（小于等于）-gt（大于）-ge（大于等于）之中的一个
+# 和C语言类似，测试条件之间还可以做与、或、非逻辑运算：
+# 带与、或、非的测试命令
+
+[ ! EXPR ]          EXPR可以是上表中的任意一种测试条件，!表示逻辑反
+[ EXPR1 -a EXPR2 ]  EXPR1和EXPR2可以是上表中的任意一种测试条件，-a表示逻辑与
+[ EXPR1 -o EXPR2 ]  EXPR1和EXPR2可以是上表中的任意一种测试条件，-o表示逻辑或
+# 例如:
+$ VAR=abc
+$ [ -d Desktop -a $VAR = 'abc' ]
+$ echo $?
+0
+# 注意，如果上例中的$VAR变量事先没有定义，则被Shell展开为空字符串，会造成测试条件的语法错误（展开为[ -d Desktop -a = 'abc' ]），作为一种好的Shell编程习惯，应该总是把变量取值放在双引号之中（展开为[ -d Desktop -a "" = 'abc' ]）：
+$ unset VAR
+$ [ -d Desktop -a $VAR = 'abc' ]
+bash: [: too many arguments
+$ [ -d Desktop -a "$VAR" = 'abc' ]
+$ echo $?
+1
 
 ```
 
-### 179.
+### 207. 脚本语法--if/then/elif/else/fi
 
-```python
+```shell
+# 和C语言类似，在Shell中用if、then、elif、else、fi这几条命令实现分支控制。这种流程控制语句本质上也是由若干条Shell命令组成的，例如先前讲过的
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+# 其实是三条命令，if [ -f ~/.bashrc ]是第一条，then . ~/.bashrc是第二条，fi是第三条。如果两条命令写在同一行则需要用;号隔开，一行只写一条命令就不需要写;号了，另外，then后面有换行，但这条命令没写完，Shell会自动续行，把下一行接在then后面当作一条命令处理。和[命令一样，要注意命令和各参数之间必须用空格隔开。if命令的参数组成一条子命令，如果该子命令的Exit Status为0（表示真），则执行then后面的子命令，如果Exit Status非0（表示假），则执行elif、else或者fi后面的子命令。if后面的子命令通常是测试命令，但也可以是其它命令。Shell脚本没有{}括号，所以用fi表示if语句块的结束。见下例：
+#! /bin/sh
 
+if [ -f /bin/bash ]
+then echo "/bin/bash is a file"
+else echo "/bin/bash is NOT a file"
+fi
+if :; then echo "always true"; fi
+# :是一个特殊的命令，称为空命令，该命令不做任何事，但Exit Status总是真。此外，也可以执行/bin/true或/bin/false得到真或假的Exit Status。再看一个例子：
+#! /bin/sh
+
+    echo "Is it morning? Please answer yes or no."
+    read YES_OR_NO
+    if [ "$YES_OR_NO" = "yes" ]; then
+      echo "Good morning!"
+    elif [ "$YES_OR_NO" = "no" ]; then
+      echo "Good afternoon!"
+    else
+      echo "Sorry, $YES_OR_NO not recognized. Enter yes or no."
+      exit 1
+    fi
+    exit 0
+# 上例中的read命令的作用是等待用户输入一行字符串，将该字符串存到一个Shell变量中。
+# 此外，Shell还提供了&&和||语法，和C语言类似，具有Short-circuit特性，很多Shell脚本喜欢写成这样：
+test "$(whoami)" != 'root' && (echo you are using a non-privileged account; exit 1)
+# &&相当于“if...then...”，而||相当于“if not...then...”。&&和||用于连接两个命令，而上面讲的-a和-o仅用于在测试表达式中连接两个测试条件，要注意它们的区别，例如，
+test "$VAR" -gt 1 -a "$VAR" -lt 3
+# 和以下写法是等价的
+test "$VAR" -gt 1 && test "$VAR" -lt 3
 ```
 
-### 180.
+### 208. 脚本语法--case/esac
 
-```python
+```shell
+# case命令可类比C语言的switch/case语句，esac表示case语句块的结束。C语言的case只能匹配整型或字符型常量表达式，而Shell脚本的case可以匹配字符串和Wildcard，每个匹配分支可以有若干条命令，末尾必须以;;结束，执行时找到第一个匹配的分支并执行相应的命令，然后直接跳到esac之后，不需要像C语言一样用break跳出。
+#! /bin/sh
 
+    echo "Is it morning? Please answer yes or no."
+    read YES_OR_NO
+    case "$YES_OR_NO" in
+    yes|y|Yes|YES)
+      echo "Good Morning!";;
+    [nN]*)
+      echo "Good Afternoon!";;
+    *)
+      echo "Sorry, $YES_OR_NO not recognized. Enter yes or no."
+      exit 1;;
+    esac
+    exit 0
+# 使用case语句的例子可以在系统服务的脚本目录/etc/init.d中找到。这个目录下的脚本大多具有这种形式（以/etc/init.d/nfs-kernel-server为例）：
+   case "$1" in
+        start)
+            ...
+        ;;
+        stop)
+            ...
+        ;;
+        reload | force-reload)
+            ...
+        ;;
+        restart)
+        ...
+        *)
+            log_success_msg "Usage: nfs-kernel-server {start|stop|status|reload|force-reload|restart}"
+            exit 1
+        ;;
+    esac
+# 启动nfs-kernel-server服务的命令是
+$ sudo /etc/init.d/nfs-kernel-server start
+# $1是一个特殊变量，在执行脚本时自动取值为第一个命令行参数，也就是start，所以进入start)分支执行相关的命令。同理，命令行参数指定为stop、reload或restart可以进入其它分支执行停止服务、重新加载配置文件或重新启动服务的相关命令。
 ```
 
-### 181.
+###209. 脚本语法--for/do/done
 
-```python
+```shell
+# Shell脚本的for循环结构和C语言很不一样，它类似于某些编程语言的foreach循环。例如：
+#! /bin/sh
 
+    for FRUIT in apple banana pear; do
+      echo "I like $FRUIT"
+    done
+# FRUIT是一个循环变量，第一次循环$FRUIT的取值是apple，第二次取值是banana，第三次取值是pear。再比如，要将当前目录下的chap0、chap1、chap2等文件名改为chap0~、chap1~、chap2~等（按惯例，末尾有~字符的文件名表示临时文件），这个命令可以这样写：
+
+$ for FILENAME in chap?; do mv $FILENAME $FILENAME~; done   
+# 也可以这样写：
+$ for FILENAME in `ls chap?`; do mv $FILENAME $FILENAME~; done
 ```
 
-### 182.
+### 210. 脚本语法--while/do/done
 
-```python
+```shell
+# while的用法和C语言类似。比如一个验证密码的脚本：
+#! /bin/sh
 
+    echo "Enter password:"
+    read TRY
+    while [ "$TRY" != "secret" ]; do
+      echo "Sorry, try again"
+      read TRY
+    done
+# 下面的例子通过算术运算控制循环的次数：
+#! /bin/sh
+
+    COUNTER=1
+    while [ "$COUNTER" -lt 10 ]; do
+      echo "Here we go again"
+      COUNTER=$(($COUNTER+1))
+    done
+    
 ```
 
-### 183.
+### 211. 脚本语法--break和continue
 
-```python
+```shell
+# break[n]可以指定跳出几层循环，continue跳过本次循环步，没跳出整个循环。
 
+# break跳出，continue跳过。
 ```
 
-### 184.
+### 212. 脚本语法--位置参数和特殊变量
 
-```python
+```shell
+# 常用的位置参数和特殊变量
+$0  相当于C语言main函数的argv[0]
+$1、$2...    这些称为位置参数（Positional Parameter），相当于C语言main函数的argv[1]、argv[2]...
+$#  相当于C语言main函数的argc - 1，注意这里的#后面不表示注释
+$@  表示参数列表"$1" "$2" ...，例如可以用在for循环中的in后面。
+$*  表示参数列表"$1" "$2" ...，同上
+$?  上一条命令的Exit Status
+$$  当前进程号
+# 位置参数可以用shift命令左移。比如shift 3表示原来的$4现在变成$1，原来的$5现在变成$2等等，原来的$1、$2、$3丢弃，$0不移动。不带参数的shift命令相当于shift 1。例如：
+#! /bin/sh
 
+    echo "The program $0 is now running"
+    echo "The first parameter is $1"
+    echo "The second parameter is $2"
+    echo "The parameter list is $@"
+    shift
+    echo "The first parameter is $1"
+    echo "The second parameter is $2"
+    echo "The parameter list is $@"
 ```
 
-### 185.
+###213. 脚本语法--echo
 
-```python
-
+```shell
+# echo显示文本行或变量，或者把字符串输入到文件。
+echo [option] string
+-e 解析转义字符
+-n 不回车换行。默认情况echo回显的内容后面跟一个回车换行。
+echo "hello\n\n"
+echo -e "hello\n\n"
+echo  "hello"
+echo -n "hello"
 ```
 
-### 186.
+### 214. 脚本语法--管道|
 
-```python
-
+```shell
+# 可以通过管道把一个命令的输出传递给另一个命令做输入。管道用竖线表示。
+cat myfile | more
+ls -l | grep "myfile"
+df -k | awk '{print $1}' | grep -v "文件系统"
+df -k 查看磁盘空间，找到第一列，去除“文件系统”，并输出
 ```
 
-### 187.
+###215. 脚本语法--tee
 
-```python
+```shell
+# tee命令把结果输出到标准输出，另一个副本输出到相应文件。
+df -k | awk '{print $1}' | grep -v "文件系统" | tee a.txt
 
+tee -a a.txt表示追加操作。
+df -k | awk '{print $1}' | grep -v "文件系统" | tee -a a.txt
 ```
 
-### 188.
+### 216. 脚本语法--文件重定向
 
-```python
-
+```shell 
+cmd > file             把标准输出重定向到新文件中
+cmd >> file            追加
+cmd > file 2>&1        标准出错也重定向到1所指向的file里
+cmd >> file 2>&1
+cmd < file1 > file2    输入输出都定向到文件里
+cmd < &fd              把文件描述符fd作为标准输入
+cmd > &fd              把文件描述符fd作为标准输出
+cmd < &-               关闭标准输入
 ```
 
-### 189.
+###217.  脚本语法--函数
 
-```python
+```shell
+# 和C语言类似，Shell中也有函数的概念，但是函数定义中没有返回值也没有参数列表。例如：
+#! /bin/sh
 
+    foo(){ echo "Function foo is called";}
+    echo "-=start=-"
+    foo
+    echo "-=end=-"
+
+# 注意函数体的左花括号'{'和后面的命令之间必须有空格或换行，如果将最后一条命令和右花括号'}'写在同一行，命令末尾必须有;号。
+
+# 在定义foo()函数时并不执行函数体中的命令，就像定义变量一样，只是给foo这个名字一个定义，到后面调用foo函数的时候（注意Shell中的函数调用不写括号）才执行函数体中的命令。Shell脚本中的函数必须先定义后调用，一般把函数定义都写在脚本的前面，把函数调用和其它命令写在脚本的最后（类似C语言中的main函数，这才是整个脚本实际开始执行命令的地方）。
+
+# Shell函数没有参数列表并不表示不能传参数，事实上，函数就像是迷你脚本，调用函数时可以传任意个参数，在函数内同样是用$0、$1、$2等变量来提取参数，函数中的位置参数相当于函数的局部变量，改变这些变量并不会影响函数外面的$0、$1、$2等变量。函数中可以用return命令返回，如果return后面跟一个数字则表示函数的Exit Status。
+
+# 下面这个脚本可以一次创建多个目录，各目录名通过命令行参数传入，脚本逐个测试各目录是否存在，如果目录不存在，首先打印信息然后试着创建该目录。
+#! /bin/sh
+
+    is_directory()
+    {
+      DIR_NAME=$1
+      if [ ! -d $DIR_NAME ]; then
+        return 1
+      else
+        return 0
+      fi
+    }
+
+    for DIR in "$@"; do
+      if is_directory "$DIR"
+      then :
+      else
+        echo "$DIR doesn't exist. Creating it now..."
+        mkdir $DIR > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+          echo "Cannot create directory $DIR"
+          exit 1
+        fi
+      fi
+    done
+
+# 注意is_directory()返回0表示真返回1表示假。
 ```
 
-### 190.
+### 218. 调试方法
 
-```python
+```shell 
+# Shell提供了一些用于调试脚本的选项，如下所示：
 
+-n
+
+# 读一遍脚本中的命令但不执行，用于检查脚本中的语法错误
+
+-v
+
+# 一边执行脚本，一边将执行过的脚本命令打印到标准错误输出
+
+-x
+
+# 提供跟踪执行信息，将执行的每一条命令和结果依次打印出来
+
+# 使用这些选项有三种方法，一是在命令行提供参数
+
+    $ sh -x ./script.sh
+# 二是在脚本开头提供参数
+
+    #! /bin/sh -x
+# 第三种方法是在脚本中用set命令启用或禁用参数
+
+    #! /bin/sh
+    if [ -z "$1" ]; then
+      set -x
+      echo "ERROR: Insufficient Args."
+      exit 1
+      set +x
+    fi
+# set -x和set +x分别表示启用和禁用-x参数，这样可以只对脚本中的某一段进行跟踪调试。
 ```
 
-### 191.
+###219. 正则表达式
 
-```python
+```shell
+# 以前用grep在一个文件中找出包含某些字符串的行，比如在头文件中找出一个宏定义。其实grep还可以找出符合某个模式（Pattern）的一类字符串。例如找出所有符合xxxxx@xxxx.xxx模式的字符串（也就是email地址），要求x字符可以是字母、数字、下划线、小数点或减号，email地址的每一部分可以有一个或多个x字符，例如abc.d@ef.com、1_2@987-6.54，当然符合这个模式的不全是合法的email地址，但至少可以做一次初步筛选，筛掉a.b、c@d等肯定不是email地址的字符串。再比如，找出所有符合yyy.yyy.yyy.yyy模式的字符串（也就是IP地址），要求y是0-9的数字，IP地址的每一部分可以有1-3个y字符。
 
+# 如果要用grep查找一个模式，如何表示这个模式，这一类字符串，而不是一个特定的字符串呢？从这两个简单的例子可以看出，要表示一个模式至少应该包含以下信息：
+
+# 字符类（Character Class）：如上例的x和y，它们在模式中表示一个字符，但是取值范围是一类字符中的任意一个。
+
+# 数量限定符（Quantifier）： 邮件地址的每一部分可以有一个或多个x字符，IP地址的每一部分可以有1-3个y字符
+
+# 各种字符类以及普通字符之间的位置关系：例如邮件地址分三部分，用普通字符@和.隔开，IP地址分四部分，用.隔开，每一部分都可以用字符类和数量限定符描述。为了表示位置关系，还有位置限定符（Anchor）的概念，将在下面介绍。
+
+# 规定一些特殊语法表示字符类、数量限定符和位置关系，然后用这些特殊语法和普通字符一起表示一个模式，这就是正则表达式（Regular Expression）。例如email地址的正则表达式可以写成[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+.[a-zA-Z0-9_.-]+，IP地址的正则表达式可以写成[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}。下一节介绍正则表达式的语法，我们先看看正则表达式在grep中怎么用。例如有这样一个文本文件testfile：
+
+192.168.1.1
+1234.234.04.5678
+123.4234.045.678
+abcde
+# 查找其中包含IP地址的行：
+
+$ egrep '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' testfile
+192.168.1.1
+1234.234.04.5678
+# egrep相当于grep -E，表示采用Extended正则表达式语法。grep的正则表达式有Basic和Extended两种规范，它们之间的区别下一节再解释。另外还有fgrep命令，相当于grep -F，表示只搜索固定字符串而不搜索正则表达式模式，不会按正则表达式的语法解释后面的参数。
+
+# 注意正则表达式参数用单引号括起来了，因为正则表达式中用到的很多特殊字符在Shell中也有特殊含义（例如\），只有用单引号括起来才能保证这些字符原封不动地传给grep命令，而不会被Shell解释掉。
+
+# 192.168.1.1符合上述模式，由三个.隔开的四段组成，每段都是1到3个数字，所以这一行被找出来了，可为什么1234.234.04.5678也被找出来了呢？因为grep找的是包含某一模式的行，这一行包含一个符合模式的字符串234.234.04.567。相反，123.4234.045.678这一行不包含符合模式的字符串，所以不会被找出来。
+
+# grep是一种查找过滤工具，正则表达式在grep中用来查找符合模式的字符串。其实正则表达式还有一个重要的应用是验证用户输入是否合法，例如用户通过网页表单提交自己的email地址，就需要用程序验证一下是不是合法的email地址，这个工作可以在网页的Javascript中做，也可以在网站后台的程序中做，例如PHP、Perl、Python、Ruby、Java或C，所有这些语言都支持正则表达式，可以说，目前不支持正则表达式的编程语言实在很少见。除了编程语言之外，很多UNIX命令和工具也都支持正则表达式，例如grep、vi、sed、awk、emacs等等。“正则表达式”就像“变量”一样，它是一个广泛的概念，而不是某一种工具或编程语言的特性。
+
+
+# 基本语法
+# 字符类:
+字符  含义               举例
+.   匹配任意一个字符          abc.可以匹配abcd、abc9等
+[]  匹配括号中的任意一个字符  [abc]d可以匹配ad、bd或cd
+-   在[]括号内表示字符范围    [0-9a-fA-F]可以匹配一位十六进制数字
+^   位于[]括号内的开头，匹配除括号中的字符之外的任意一个字符  [^xy]匹配除xy之外的任一字符，因此[^xy]1可以匹配a1、b1但不匹配x1、y1
+
+[[:xxx:]]   grep工具预定义的一些命名字符类   [[:alpha:]]匹配一个字母，[[:digit:]]匹配一个数字
+# 数量限定符:
+字符    含义                             举例
+?   紧跟在它前面的单元应匹配零次或一次    [0-9]?\.[0-9]匹配0.0、2.3、.5等，由于.在正则表达式中是一个特殊字符，所以需要用\转义一下，取字面值
++   紧跟在它前面的单元应匹配一次或多次    [a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+\.[a-zA-Z0-9_.-]+匹配email地址
+*   紧跟在它前面的单元应匹配零次或多次    [0-9][0-9]*匹配至少一位数字，等价于[0-9]+，[a-zA-Z_]+[a-zA-Z_0-9]*匹配C语言的标识符
+{N} 紧跟在它前面的单元应精确匹配N次       [1-9][0-9]{2}匹配从100到999的整数
+{N,}  紧跟在它前面的单元应匹配至少N次     [1-9][0-9]{2,}匹配三位以上（含三位）的整数
+{,M}  紧跟在它前面的单元应匹配最多M次     [0-9]{,1}相当于[0-9]?
+{N,M} 紧跟在它前面的单元应匹配至少N次，最多M次   [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}匹配IP地址
+# 再次注意grep找的是包含某一模式的行，而不是完全匹配某一模式的行。再举个例子，如果文本文件的内容是
+aaabc
+aad
+efg
+# 查找a*这个模式的结果是三行都被找出来了
+$ egrep 'a*' testfile 
+aabc
+aad
+efg
+# a匹配0个或多个a，而第三行包含0个a，所以也包含了这一模式。单独用a这样的正则表达式做查找没什么意义，一般是把a*作为正则表达式的一部分来用。
+# 位置限定符:
+字符  含义                举例
+    ^   匹配行首的位置        ^Content匹配位于一行开头的Content
+    $   匹配行末的位置        ;$匹配位于一行结尾的;号，^$匹配空行
+    \<  匹配单词开头的位置    \<th匹配... this，但不匹配ethernet、tenth
+    \>  匹配单词结尾的位置    p\>匹配leap ...，但不匹配parent、sleepy
+    \b  匹配单词开头或结尾的位置     \bat\b匹配... at ...，但不匹配cat、atexit、batch
+    \B  匹配非单词开头和结尾的位置   \Bat\B匹配battery，但不匹配... attend、hat ...
+# 位置限定符可以帮助grep更准确地查找，例如上一节我们用[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}查找IP地址，找到这两行
+192.168.1.1
+1234.234.04.5678
+# 如果用^[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}.[0-9]{1,3}$查找，就可以把1234.234.04.5678这一行过滤掉了。
+# 其它特殊字符
+字符  含义    举例
+\    转义字符，普通字符转义为特殊字符，特殊字符转义为普通字符   普通字符<写成\<表示单词开头的位置，特殊字符.写成\.以及\写成\\就当作普通字符来匹配
+()   将正则表达式的一部分括起来组成一个单元，可以对整个单元使用数量限定符    ([0-9]{1,3}\.){3}[0-9]{1,3}匹配IP地址
+|    连接两个子表达式，表示或的关系     n(o|either)匹配no或neither
+# 以上介绍的是grep正则表达式的Extended规范，Basic规范也有这些语法，只是字符?+{}|()应解释为普通字符，要表示上述特殊含义则需要加\转义。如果用grep而不是egrep，并且不加-E参数，则应该遵照Basic规范来写正则表达式。
 ```
 
-### 192.
+### 220. grep
 
-```python
+```shell 
+# 1.作用
 
+# Linux系统中grep命令是一种强大的文本搜索工具，它能使用正则表达式搜索文本，并把匹 配的行打印出来。grep全称是Global Regular Expression Print，表示全局正则表达式版本，它的使用权限是所有用户。
+
+# grep家族包括grep、egrep和fgrep。egrep和fgrep的命令只跟grep有很小不同。egrep是grep的扩展，支持更多的re元字符， fgrep就是fixed grep或fast grep，它们把所有的字母都看作单词，也就是说，正则表达式中的元字符表示回其自身的字面意义，不再特殊。linux使用GNU版本的grep。它功能更强，可以通过-G、-E、-F命令行选项来使用egrep和fgrep的功能。
+
+# 2.格式
+
+grep [options]
+# 3.主要参数
+
+grep --help
+
+# [options]主要参数：
+-c：只输出匹配行的计数。
+-i：不区分大小写。
+-h：查询多文件时不显示文件名。
+-l：查询多文件时只输出包含匹配字符的文件名。
+-n：显示匹配行及 行号。
+-s：不显示不存在或无匹配文本的错误信息。
+-v：显示不包含匹配文本的所有行。
+--color=auto ：可以将找到的关键词部分加上颜色的显示。
+# pattern正则表达式主要参数：
+
+\： 忽略正则表达式中特殊字符的原有含义。
+^：匹配正则表达式的开始行。
+$: 匹配正则表达式的结束行。
+\<：从匹配正则表达 式的行开始。
+\>：到匹配正则表达式的行结束。
+[ ]：单个字符，如[A]即A符合要求 。
+[ - ]：范围，如[A-Z]，即A、B、C一直到Z都符合要求 。
+.：所有的单个字符。
+*：有字符，长度可以为0。
+4.grep命令使用简单实例
+
+$ grep ‘test’ d*
+# 显示所有以d开头的文件中包含 test的行。
+
+$ grep ‘test’ aa bb cc
+# 显示在aa，bb，cc文件中匹配test的行。
+
+$ grep ‘[a-z]\{5\}’ aa
+# 显示所有包含每个字符串至少有5个连续小写字符的字符串的行。
+
+$ grep ‘w\(es\)t.*\1′ aa
+# 如果west被匹配，则es就被存储到内存中，并标记为1，然后搜索任意个字符(.*)，这些字符后面紧跟着 另外一个es(\1)，找到就显示该行。如果用egrep或grep -E，就不用”\”号进行转义，直接写成’w(es)t.*\1′就可以了。
+# 5.grep命令使用复杂实例
+
+# 明确要求搜索子目录：
+
+grep -r
+# 或忽略子目录：
+
+grep -d skip
+# 如果有很多输出时，您可以通过管道将其转到’less’上阅读：
+
+$ grep magic /usr/src/Linux/Documentation/* | less
+# 这样，您就可以更方便地阅读。
+
+# 有一点要注意，您必需提供一个文件过滤方式(搜索全部文件的话用 *)。如果您忘了，’grep’会一直等着，直到该程序被中断。如果您遇到了这样的情况，按 ，然后再试。
+
+# 下面还有一些有意思的命令行参数：
+
+grep -i pattern files ：不区分大小写地搜索。默认情况区分大小写，
+grep -l pattern files ：只列出匹配的文件名，
+grep -L pattern files ：列出不匹配的文件名，
+grep -w pattern files ：只匹配整个单词，而不是字符串的一部分(如匹配’magic’，而不是’magical’)，
+grep -C number pattern files ：匹配的上下文分别显示[number]行，
+grep pattern1 | pattern2 files ：显示匹配 pattern1 或 pattern2 的行，
+例如：grep "abc\|xyz" testfile    表示过滤包含abc或xyz的行
+grep pattern1 files | grep pattern2 ：显示既匹配 pattern1 又匹配 pattern2 的行。
+
+grep -n pattern files  即可显示行号信息
+
+grep -c pattern files  即可查找总行数
+# 还有些用于搜索的特殊符号：
+
+\< 和 \> 分别标注单词的开始与结尾。
+例如：
+grep man * 会匹配 ‘Batman’、’manic’、’man’等，
+grep ‘\<man’ * 匹配’manic’和’man’，但不是’Batman’，
+grep ‘\<man\>’ 只匹配’man’，而不是’Batman’或’manic’等其他的字符串。
+‘^’：指匹配的字符串在行首，
+‘$’：指匹配的字符串在行 尾，
 ```
 
-### 193.
+###221. find
 
-```python
+```shell
+# 由于find具有强大的功能，所以它的选项也很多，其中大部分选项都值得我们花时间来了解一下。即使系统中含有网络文件系统( NFS)，find命令在该文件系统中同样有效，只要你具有相应的权限。
 
+# 在运行一个非常消耗资源的find命令时，很多人都倾向于把它放在后台执行，因为遍历一个大的文件系统可能会花费很长的时间(这里是指30G字节以上的文件系统)。
+
+# 一、find 命令格式
+
+# 1、find命令的一般形式为；
+
+find pathname -options [-print -exec -ok ...]
+# 2、find命令的参数；
+
+pathname: find命令所查找的目录路径。例如用.来表示当前目录，用/来表示系统根目录，递归查找。
+-print： find命令将匹配的文件输出到标准输出。
+-exec： find命令对匹配的文件执行该参数所给出的shell命令。相应命令的形式为'command' {  } \;，注意{   }和\；之间的空格。
+-ok： 和-exec的作用相同，只不过以一种更为安全的模式来执行该参数所给出的shell命令，在执行每一个命令之前，都会给出提示，让用户来确定是否执行。
+# 3、find命令选项
+
+-name   按照文件名查找文件。
+-perm   按照文件权限来查找文件。
+-prune  使用这一选项可以使find命令不在当前指定的目录中查找，如果同时使用-depth选项，那么-prune将被find命令忽略。
+-user   按照文件属主来查找文件。
+-group  按照文件所属的组来查找文件。
+-mtime -n +n 按照文件的更改时间来查找文件，-n表示文件更改时间距现在n天以内，+n表示文件更改时间距现在n天以前。find命令还有-atime和-ctime 选项，但它们都和-m time选项。
+-nogroup 查找无有效所属组的文件，即该文件所属的组在/etc/groups中不存在。
+-nouser 查找无有效属主的文件，即该文件的属主在/etc/passwd中不存在。
+-newer file1 ! file2 查找更改时间比文件file1新但比文件file2旧的文件。
+-type   查找某一类型的文件，诸如：
+    b - 块设备文件。
+    d - 目录。
+    c - 字符设备文件。
+    p - 管道文件。
+    l - 符号链接文件。
+    f - 普通文件。
+-size n：[c] 查找文件长度为n块的文件，带有c时表示文件长度以字节计。
+-depth   在查找文件时，首先查找当前目录中的文件，然后再在其子目录中查找。
+-fstype  查找位于某一类型文件系统中的文件，这些文件系统类型通常可以在配置文件/etc/fstab中找到，该配置文件中包含了本系统中有关文件系统的信息。
+-mount   在查找文件时不跨越文件系统mount点。
+-follow  如果find命令遇到符号链接文件，就跟踪至链接所指向的文件。
+另外,下面三个的区别:
+
+-amin n   查找系统中最后N分钟访问的文件
+-atime n  查找系统中最后n*24小时访问的文件
+-cmin n   查找系统中最后N分钟被改变文件状态的文件
+-ctime n  查找系统中最后n*24小时被改变文件状态的文件
+-mmin n   查找系统中最后N分钟被改变文件数据的文件
+-mtime n  查找系统中最后n*24小时被改变文件数据的文件
+# 4、使用exec或ok来执行shell命令
+
+# 使用find时，只要把想要的操作写在一个文件里，就可以用exec来配合find查找，很方便 在有些操作系统中只允许-exec选项执行诸如ls或ls -l这样的命令。大多数用户使用这一选项是为了查找旧文件并删除它们。建议在真正执行rm命令删除文件之前，最好先用ls命令看一下，确认它们是所要删除的文件。
+
+# exec选项后面跟随着所要执行的命令或脚本，然后是一对儿{}，一个空格和一个\，最后是一个分号。为了使用exec选项，必须要同时使用print选项。如果验证一下find命令，会发现该命令只输出从当前路径起的相对路径及文件名。
+
+# 例如：为了用ls -l命令列出所匹配到的文件，可以把ls -l命令放在find命令的-exec选项中
+
+# find . -type f -exec ls -l {} \;
+# 上面的例子中，find命令匹配到了当前目录下的所有普通文件，并在-exec选项中使用ls -l命令将它们列出。
+
+# 在/logs目录中查找更改时间在5日以前的文件并删除它们：
+
+$ find logs -type f -mtime +5 -exec rm {} \;
+# 记住：在shell中用任何方式删除文件之前，应当先查看相应的文件，一定要小心！当使用诸如mv或rm命令时，可以使用-exec选项的安全模式。它将在对每个匹配到的文件进行操作之前提示你。
+
+# 在下面的例子中， find命令在当前目录中查找所有文件名以.LOG结尾、更改时间在5日以上的文件，并删除它们，只不过在删除之前先给出提示。
+
+$ find . -name "*.conf"  -mtime +5 -ok rm {  } \;
+< rm ... ./conf/httpd.conf > ? n
+# 按y键删除文件，按n键不删除。
+
+# 任何形式的命令都可以在-exec选项中使用。
+
+# 在下面的例子中我们使用grep命令。find命令首先匹配所有文件名为“ passwd*”的文件，例如passwd、passwd.old、passwd.bak，然后执行grep命令看看在这些文件中是否存在一个itcast用户。
+
+# find /etc -name "passwd*" -exec grep "itcast" {  } \;
+
+itcast:x:1000:1000::/home/itcast:/bin/bash
+# 选项详解
+
+# 1.使用name选项
+
+# 文件名选项是find命令最常用的选项，要么单独使用该选项，要么和其他选项一起使用。
+
+# 可以使用某种文件名模式来匹配文件，记住要用引号将文件名模式引起来。
+
+# 不管当前路径是什么，如果想要在自己的根目录$HOME中查找文件名符合*.txt的文件，使用~作为 'pathname'参数，波浪号~代表了你的$HOME目录。
+
+$ find ~ -name "*.txt" -print
+# 想要在当前目录及子目录中查找所有的‘ *.txt’文件，可以用：
+
+$ find . -name "*.txt" -print
+# 想要的当前目录及子目录中查找文件名以一个大写字母开头的文件，可以用：
+
+$ find . -name "[A-Z]*" -print
+# 想要在/etc目录中查找文件名以host开头的文件，可以用：
+
+$ find /etc -name "host*" -print
+# 想要查找$HOME目录中的文件，可以用：
+
+$ find ~ -name "*" -print 或find . -print
+# 要想让系统高负荷运行，就从根目录开始查找所有的文件：
+
+$ find / -name "*" -print
+# 如果想在当前目录查找文件名以两个小写字母开头，跟着是两个数字，最后是.txt的文件，下面的命令就能够返回例如名为ax37.txt的文件：
+
+$find . -name "[a-z][a-z][0-9][0-9].txt" -print
+# 2、用perm选项
+
+# 按照文件权限模式用-perm选项,按文件权限模式来查找文件的话。最好使用八进制的权限表示法。
+
+# 如在当前目录下查找文件权限位为755的文件，即文件属主可以读、写、执行，其他用户可以读、执行的文件，可以用：
+
+$ find . -perm 755 -print
+# 还有一种表达方法：在八进制数字前面要加一个横杠-，表示都匹配，如-007就相当于777，-006相当于666
+
+# ls -l
+# find . -perm 006
+# find . -perm -006
+
+-perm mode:文件许可正好符合mode
+-perm +mode:文件许可部分符合mode
+-perm -mode: 文件许可完全符合mode
+# 3、忽略某个目录
+
+# 如果在查找文件时希望忽略某个目录，因为你知道那个目录中没有你所要查找的文件，那么可以使用-prune选项来指出需要忽略的目录。在使用-prune选项时要当心，因为如果你同时使用了-depth选项，那么-prune选项就会被find命令忽略。
+
+# 如果希望在/apps目录下查找文件，但不希望在/apps/bin目录下查找，可以用：
+
+$ find /apps -path "/apps/bin" -prune -o -print
+# 4、使用find查找文件的时候怎么避开某个文件目录
+
+# 比如要在/home/itcast目录下查找不在dir1子目录之内的所有文件
+
+find /home/itcast -path "/home/itcast/dir1" -prune -o -print
+# 避开多个文件夹
+
+find /home \( -path /home/itcast/f1 -o -path /home/itcast/f2 \) -prune -o -print
+注意(前的\,注意(后的空格。
+
+# 5、使用user和nouser选项
+
+# 按文件属主查找文件，如在$HOME目录中查找文件属主为itcast的文件，可以用：
+
+$ find ~ -user itcast -print
+# 在/etc目录下查找文件属主为uucp的文件：
+
+$ find /etc -user uucp -print
+# 为了查找属主帐户已经被删除的文件，可以使用-nouser选项。这样就能够找到那些属主在/etc/passwd文件中没有有效帐户的文件。在使用-nouser选项时，不必给出用户名； find命令能够为你完成相应的工作。
+
+# 例如，希望在/home目录下查找所有的这类文件，可以用：
+
+$ find /home -nouser -print
+# 6、使用group和nogroup选项
+
+# 就像user和nouser选项一样，针对文件所属于的用户组， find命令也具有同样的选项，为了在/apps目录下查找属于itcast用户组的文件，可以用：
+
+$ find /apps -group itcast -print
+# 要查找没有有效所属用户组的所有文件，可以使用nogroup选项。下面的find命令从文件系统的根目录处查找这样的文件
+
+$ find / -nogroup -print
+# 7、按照更改时间或访问时间等查找文件
+
+# 如果希望按照更改时间来查找文件，可以使用mtime,atime或ctime选项。如果系统突然没有可用空间了，很有可能某一个文件的长度在此期间增长迅速，这时就可以用mtime选项来查找这样的文件。
+
+# 用减号-来限定更改时间在距今n日以内的文件，而用加号+来限定更改时间在距今n日以前的文件。
+
+# 希望在系统根目录下查找更改时间在5日以内的文件，可以用：
+
+$ find / -mtime -5 -print
+# 为了在/var/adm目录下查找更改时间在3日以前的文件，可以用：
+
+$ find /var/adm -mtime +3 -print
+# 8、查找比某个文件新或旧的文件
+
+# 如果希望查找更改时间比某个文件新但比另一个文件旧的所有文件，可以使用-newer选项。它的一般形式为：
+
+newest_file_name ! oldest_file_name
+
+# 其中，！是逻辑非符号。
+# 9、使用type选项
+
+# 在/etc目录下查找所有的目录，可以用：
+
+$ find /etc -type d -print
+# 在当前目录下查找除目录以外的所有类型的文件，可以用：
+
+$ find . ! -type d -print
+# 在/etc目录下查找所有的符号链接文件，可以用
+
+$ find /etc -type l -print
+# 10、使用size选项
+
+# 可以按照文件长度来查找文件，这里所指的文件长度既可以用块（block）来计量，也可以用字节来计量。以字节计量文件长度的表达形式为N c；以块计量文件长度只用数字表示即可。
+
+# 在按照文件长度查找文件时，一般使用这种以字节表示的文件长度，在查看文件系统的大小，因为这时使用块来计量更容易转换。 在当前目录下查找文件长度大于1 M字节的文件：
+
+$ find . -size +1000000c -print
+# 在/home/apache目录下查找文件长度恰好为100字节的文件：
+
+$ find /home/apache -size 100c -print
+# 在当前目录下查找长度超过10块的文件（一块等于512字节）：
+
+$ find . -size +10 -print
+# 11、使用depth选项
+
+# 在使用find命令时，可能希望先匹配所有的文件，再在子目录中查找。使用depth选项就可以使find命令这样做。这样做的一个原因就是，当在使用find命令向磁带上备份文件系统时，希望首先备份所有的文件，其次再备份子目录中的文件。
+
+# 在下面的例子中， find命令从文件系统的根目录开始，查找一个名为CON.FILE的文件。
+
+# 它将首先匹配所有的文件然后再进入子目录中查找。
+
+$ find / -name "CON.FILE" -depth -print
+# 12、使用mount选项
+
+# 在当前的文件系统中查找文件（不进入其他文件系统），可以使用find命令的mount选项。
+
+# 从当前目录开始查找位于本文件系统中文件名以XC结尾的文件：
+
+$ find . -name "*.XC" -mount -print
+
+
+# find命令的例子；
+
+# 1、查找当前用户主目录下的所有文件：
+
+# 下面两种方法都可以使用
+
+$ find $HOME -print
+$ find ~ -print
+# 2、让当前目录中文件属主具有读、写权限，并且文件所属组的用户和其他用户具有读权限的文件；
+
+$ find . -type f -perm 644 -exec ls -l {  } \;
+# 3、为了查找系统中所有文件长度为0的普通文件，并列出它们的完整路径；
+
+$ find / -type f -size 0 -exec ls -l {  } \;
+# 4、查找/var/logs目录中更改时间在7日以前的普通文件，并在删除之前询问它们；
+
+$ find /var/logs -type f -mtime +7 -ok rm {  } \;
+# 5、为了查找系统中所有属于root组的文件；
+
+$find . -group root -exec ls -l {  } \;
+# 6、find命令将删除当目录中访问时间在7日以来、含有数字后缀的admin.log文件。
+
+# 该命令只检查三位数字，所以相应文件的后缀不要超过999。先建几个admin.log*的文件 ，才能使用下面这个命令
+
+$ find . -name "admin.log[0-9][0-9][0-9]" -atime -7  -ok rm {  } \;
+# 7、为了查找当前文件系统中的所有目录并排序；
+
+$ find . -type d | sort
+# 三、xargs
+
+# xargs - build and execute command lines from standard input
+
+# 在使用find命令的-exec选项处理匹配到的文件时， find命令将所有匹配到的文件一起传递给exec执行。但有些系统对能够传递给exec的命令长度有限制，这样在find命令运行几分钟之后，就会出现 溢出错误。错误信息通常是“参数列太长”或“参数列溢出”。这就是xargs命令的用处所在，特别是与find命令一起使用。
+
+# find命令把匹配到的文件传递给xargs命令，而xargs命令每次只获取一部分文件而不是全部，不像-exec选项那样。这样它可以先处理最先获取的一部分文件，然后是下一批，并如此继续下去。
+
+# 在有些系统中，使用-exec选项会为处理每一个匹配到的文件而发起一个相应的进程，并非将匹配到的文件全部作为参数一次执行；这样在有些情况下就会出现进程过多，系统性能下降的问题，因而效率不高；
+
+# 而使用xargs命令则只有一个进程。另外，在使用xargs命令时，究竟是一次获取所有的参数，还是分批取得参数，以及每一次获取参数的数目都会根据该命令的选项及系统内核中相应的可调参数来确定。
+
+# 来看看xargs命令是如何同find命令一起使用的，并给出一些例子。
+
+# 下面的例子查找系统中的每一个普通文件，然后使用xargs命令来测试它们分别属于哪类文 件
+
+find . -type f -print | xargs file
+# 在当前目录下查找所有用户具有读、写和执行权限的文件，并收回相应的写权限：
+
+ ls -l
+ find . -perm -7 -print | xargs chmod o-w
+ ls -l
+# 用grep命令在所有的普通文件中搜索hello这个词：
+
+ find . -type f -print | xargs grep "hello"
+# 用grep命令在当前目录下的所有普通文件中搜索hello这个词：
+
+ find . -name \* -type f -print | xargs grep "hello"
+# 注意，在上面的例子中， \用来取消find命令中的*在shell中的特殊含义。
+
+# find命令配合使用exec和xargs可以使用户对所匹配到的文件执行几乎所有的命令。
 ```
 
-### 194.
+### 222.  sed
 
-```python
+```shell 
+# sed意为流编辑器（Stream Editor），在Shell脚本和Makefile中作为过滤器使用非常普遍，也就是把前一个程序的输出引入sed的输入，经过一系列编辑命令转换为另一种格式输出。sed和vi都源于早期UNIX的ed工具，所以很多sed命令和vi的末行命令是相同的。
 
+# sed命令行的基本格式为
+
+sed option 'script' file1 file2 ...
+sed option -f scriptfile file1 file2 ...
+# 选项含义：
+
+--version            显示sed版本。
+--help               显示帮助文档。
+-n,--quiet,--silent  静默输出，默认情况下，sed程序在所有的脚本指令执行完毕后，将自动打印模式空间中的内容，这些选项可以屏蔽自动打印。
+-e script            允许多个脚本指令被执行。
+-f script-file, 
+--file=script-file   从文件中读取脚本指令，对编写自动脚本程序来说很棒！
+-i,--in-place        直接修改源文件，经过脚本指令处理后的内容将被输出至源文件（源文件被修改）慎用！
+-l N, --line-length=N 该选项指定l指令可以输出的行长度，l指令用于输出非打印字符。
+--posix             禁用GNU sed扩展功能。
+-r, --regexp-extended  在脚本指令中使用扩展正则表达式
+-s, --separate      默认情况下，sed将把命令行指定的多个文件名作为一个长的连续的输入流。而GNU sed则允许把他们当作单独的文件，这样如正则表达式则不进行跨文件匹配。
+-u, --unbuffered    最低限度的缓存输入与输出。
+# 以上仅是sed程序本身的选项功能说明，至于具体的脚本指令（即对文件内容做的操作）后面我们会详细描述，这里就简单介绍几个脚本指令操作作为sed程序的例子。
+
+a,append        追加
+i,insert        插入
+d,delete        删除
+s,substitution  替换
+# 如：$ sed "2a itcast" ./testfile 在输出testfile内容的第二行后添加"itcast"。
+
+$ sed "2,5d" testfile
+# sed处理的文件既可以由标准输入重定向得到，也可以当命令行参数传入，命令行参数可以一次传入多个文件，sed会依次处理。sed的编辑命令可以直接当命令行参数传入，也可以写成一个脚本文件然后用-f参数指定，编辑命令的格式为
+
+/pattern/action
+# 其中pattern是正则表达式，action是编辑操作。sed程序一行一行读出待处理文件，如果某一行与pattern匹配，则执行相应的action，如果一条命令没有pattern而只有action，这个action将作用于待处理文件的每一行。
+
+# 常用的sed命令
+/pattern/p  打印匹配pattern的行
+/pattern/d  删除匹配pattern的行
+/pattern/s/pattern1/pattern2/   查找符合pattern的行，将该行第一个匹配pattern1的字符串# 替换为pattern2
+/pattern/s/pattern1/pattern2/g  查找符合pattern的行，将该行所有匹配pattern1的字符串替换为pattern2
+# 使用p命令需要注意，sed是把待处理文件的内容连同处理结果一起输出到标准输出的，因此p命令表示除了把文件内容打印出来之外还额外打印一遍匹配pattern的行。比如一个文件testfile的内容是
+
+123
+abc
+456
+# 打印其中包含abc的行
+
+$ sed '/abc/p' testfile
+123
+abc
+abc
+456
+# 要想只输出处理结果，应加上-n选项，这种用法相当于grep命令
+
+$ sed -n '/abc/p' testfile
+abc
+# 使用d命令就不需要-n参数了，比如删除含有abc的行
+
+$ sed '/abc/d' testfile
+123
+456
+# 注意，sed命令不会修改原文件，删除命令只表示某些行不打印输出，而不是从原文件中删去。
+
+# 使用查找替换命令时，可以把匹配pattern1的字符串复制到pattern2中，比如：
+
+$ sed 's/bc/-&-/' testfile
+123
+a-bc-
+456
+# pattern2中的&表示原文件的当前行中与pattern1相匹配的字符串
+再比如：
+
+$ sed 's/\([0-9]\)\([0-9]\)/-\1-~\2~/' testfile
+-1-~2~3
+abc
+-4-~5~6
+# pattern2中的\1表示与pattern1的第一个()括号相匹配的内容，\2表示与pattern1的第二个()括号相匹配的内容。sed默认使用Basic正则表达式规范，如果指定了-r选项则使用Extended规范，那么()括号就不必转义了。
+
+$ sed  's/yes/no/;s/static/dhcp/'  ./testfile
+# 注：使用分号隔开指令。
+
+$ sed -e 's/yes/no/' -e 's/static/dhcp/' testfile
+# 注：使用-e选项。
+# 如果testfile的内容是
+
+<html><head><title>Hello World</title></head>
+<body>Welcome to the world of regexp!</body></html>
+# 现在要去掉所有的HTML标签，使输出结果为
+
+Hello World
+Welcome to the world of regexp!
+# 怎么做呢？如果用下面的命令
+
+$ sed 's/<.*>//g' testfile
+# 结果是两个空行，把所有字符都过滤掉了。这是因为，正则表达式中的数量限定符会匹配尽可能长的字符串，这称为贪心的(Greedy)。比如sed在处理第一行时，<.*>匹配的并不是或这样的标签，而是
+
+<html><head><title>Hello World</title>
+# 这样一整行，因为这一行开头是<，中间是若干个任意字符，末尾是>。
+
+sed 's/<[^>]*>/ /g' testfile
 ```
 
-### 195.
+### 220. awk
 
-```python
+```shell 
+# sed以行为单位处理文件，awk比sed强的地方在于不仅能以行为单位还能以列为单位处理文件。awk缺省的行分隔符是换行，缺省的列分隔符是连续的空格和Tab，但是行分隔符和列分隔符都可以自定义，比如/etc/passwd文件的每一行有若干个字段，字段之间以:分隔，就可以重新定义awk的列分隔符为:并以列为单位处理这个文件。awk实际上是一门很复杂的脚本语言，还有像C语言一样的分支和循环结构，但是基本用法和sed类似，awk命令行的基本形式为：
 
+awk option 'script' file1 file2 ...
+awk option -f scriptfile file1 file2 ...
+# 和sed一样，awk处理的文件既可以由标准输入重定向得到，也可以当命令行参数传入，编辑命令可以直接当命令行参数传入，也可以用-f参数指定一个脚本文件，编辑命令的格式为：
+
+/pattern/{actions}
+condition{actions}
+# 和sed类似，pattern是正则表达式，actions是一系列操作。awk程序一行一行读出待处理文件，如果某一行与pattern匹配，或者满足condition条件，则执行相应的actions，如果一条awk命令只有actions部分，则actions作用于待处理文件的每一行。比如文件testfile的内容表示某商店的库存量：
+
+ProductA  30
+ProductB  76
+ProductC  55
+# 打印每一行的第二列:
+
+$ awk '{print $2;}' testfile
+30
+76
+55
+# 自动变量$1、$2分别表示第一列、第二列等，类似于Shell脚本的位置参数，而$0表示整个当前行。再比如，如果某种产品的库存量低于75则在行末标注需要订货：
+
+$ awk '$2<75 {printf "%s\t%s\n", $0, "REORDER";} $2>=75 {print $0;}' testfile
+ProductA  30    REORDER
+ProductB  76
+ProductC  55    REORDER
+# 可见awk也有和C语言非常相似的printf函数。awk命令的condition部分还可以是两个特殊的condition－BEGIN和END，对于每个待处理文件，BEGIN后面的actions在处理整个文件之前执行一次，END后面的actions在整个文件处理完之后执行一次。
+
+# awk命令可以像C语言一样使用变量（但不需要定义变量），比如统计一个文件中的空行数
+
+$ awk '/^ *$/ {x=x+1;} END {print x;}' testfile
+# 就像Shell的环境变量一样，有些awk变量是预定义的有特殊含义的：
+
+# awk常用的内建变量
+
+FILENAME  当前输入文件的文件名，该变量是只读的
+NR  当前行的行号，该变量是只读的，R代表record
+NF  当前行所拥有的列数，该变量是只读的，F代表field
+OFS 输出格式的列分隔符，缺省是空格
+FS  输入文件的列分融符，缺省是连续的空格和Tab
+ORS 输出格式的行分隔符，缺省是换行符
+RS  输入文件的行分隔符，缺省是换行符
+# 例如打印系统中的用户帐号列表
+
+$ awk 'BEGIN {FS=":"} {print $1;}' /etc/passwd
 ```
 
-### 196.
+###221. linux核心命令
 
-```python
+```shell
+# 文本处理类的命令：
 
+# wc:
+
+wc [option] [file]...
+    -l: 统计行数
+    -c: 统计字节数
+    -w；统计单词数
+# tr
+
+# tr: 转换字符或删除字符
+    tr '集合1' '集合2'
+    tr -d '字符集合'
+# cut
+
+# This is a test line.
+-d字符：指定分隔符
+-f#: 指定要显示字段
+    单个数字：一个字段
+    逗号分隔的多个数字：指定多个离散字段
+    -：连续字段，如3-5；
+# sort
+
+# 按字符进行比较
+sort [option] file...
+    -f: 忽略字符大小写；
+    -n: 比较数值大小；
+    -t: 指定分隔符
+    -k: 指定分隔后进行比较字段
+    -u: 重复的行，只显示一次；
+# uniq
+
+# 移除重复的行
+-c：显示每行重复的次数
+-d：仅显示重复过的行
+-u: 仅显示不曾重复的行
+# 工具速查链接
+
+http://linuxtools-rst.readthedocs.io/zh_CN/latest/tool/index.html
 ```
 
-### 197.
+### 222.  练习
 
-```python
+```shell 
+求2个数之和
+计算1-100的和
+将一目录下所有的文件的扩展名改为bak
+编译当前目录下的所有.c文件：
+打印root可以使用可执行文件数，处理结果: root's bins: 2306
+打印当前sshd的端口和进程id，处理结果: sshd Port&&pid: 22 5412
+输出本机创建20000个目录所用的时间，处理结果:
 
+real    0m3.367s
+user    0m0.066s
+sys     0m1.925s
+打印本机的交换分区大小，处理结果: Swap:1024M
+
+文本分析，取出/etc/password中shell出现的次数
+
+第一种方法结果:
+      4 /bin/bash
+      1 /bin/sync
+      1 /sbin/halt
+     31 /sbin/nologin
+      1 /sbin/shutdown
+第二种方法结果:
+        /bin/sync       1
+        /bin/bash       1
+        /sbin/nologin   30
+        /sbin/halt      1
+        /sbin/shutdown  1
+文件整理，employee文件中记录了工号和姓名,（提示join）
+
+employee.txt:
+    100 Jason Smith 
+    200 John Doe 
+    300 Sanjay Gupta 
+    400 Ashok Sharma 
+    bonus文件中记录工号和工资
+bonus.txt:
+    100 $5,000 
+    200 $500 
+    300 $3,000 
+    400 $1,250 
+要求把两个文件合并并输出如下，处理结果:
+    400 ashok sharma $1,250
+    100 jason smith  $5,000
+    200 john doe  $500
+    300 sanjay gupta  $3,000
+写一个shell脚本来得到当前的日期，时间，用户名和当前工作目录。
+
+编写shell脚本获取本机的网络地址。
+编写个shell脚本将当前目录下大于10K的文件转移到/tmp目录下
+编写一个名为myfirstshell.sh的脚本，它包括以下内容。
+
+a) 包含一段注释，列出您的姓名、脚本的名称和编写这个脚本的目的。
+b) 问候用户。
+c) 显示日期和时间。
+d) 显示这个月的日历。
+e) 显示您的机器名。
+f) 显示当前这个操作系统的名称和版本。
+g) 显示父目录中的所有文件的列表。
+h) 显示root正在运行的所有进程。
+i) 显示变量TERM、PATH和HOME的值。
+j) 显示磁盘使用情况。
+k) 用id命令打印出您的组ID。
+m) 跟用户说“Good bye”
+文件移动拷贝，有m1.txt m2.txt m3.txt m4.txt，分别创建出对应的目录，m1 m2 m3 m4 并把文件移动到对应的目录下
+
+root用户今天登陆了多长时间
+终端输入一个文件名，判断是否是设备文件
+统计IP访问：要求分析apache访问日志，找出访问页面数量在前100位的IP数。日志大小在78M左右。以下是apache的访问日志节选
+
+202.101.129.218 - - [26/Mar/2006:23:59:55 +0800] "GET /online/stat_inst.php?pid=d065 HTTP/1.1" 302 20-"-" "-" "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"
+设计一个Shell程序，在/userdata目录下建立50个目录，即user1～user50，并设置每个目录的权限，其中其他用户的权限为：读；文件所有者的权限为：读、写、执行；文件所有者所在组的权限为：读、执行。
+
+设计一个shell程序，添加一个新组为class1，然后添加属于这个组的30个用户，用户名的形式为stdxx，其中xx从01到30，并设置密码为对应的stdxx。
+编写shell程序，实现自动删除30个账号的功能。账号名为std01至std30。
+用户清理,清除本机除了当前登陆用户以外的所有用户
+设计一个shell程序，在每月第一天备份并压缩/etc目录的所有内容，存放在/root/bak目录里，且文件名,为如下形式yymmdd_etc，yy为年，mm为月，dd为日。Shell程序fileback存放在/usr/bin目录下。
+对于一个用户日志文件，每行记录了一个用户查询串，长度为1-255字节，共几千万行，请排出查询最多的前100条。 日志可以自己构造。 (提示：awk sort uniq head)
+编写自己的ubuntu环境安装脚本
+编写服务器守护进程管理脚本。
+查看TCP连接状态
+
+netstat -nat |awk ‘{print $6}’|sort|uniq -c|sort -rn
+
+netstat -n | awk ‘/^tcp/ {++S[$NF]};END {for(a in S) print a, S[a]}’ 或
+netstat -n | awk ‘/^tcp/ {++state[$NF]}; END {for(key in state) print key,"\t",state[key]}’
+netstat -n | awk ‘/^tcp/ {++arr[$NF]};END {for(k in arr) print k,"t",arr[k]}’
+
+netstat -n |awk ‘/^tcp/ {print $NF}’|sort|uniq -c|sort -rn
+
+netstat -ant | awk ‘{print $NF}’ | grep -v ‘[a-z]‘ | sort | uniq -c
+查找请求数请20个IP（常用于查找攻来源）：
+
+netstat -anlp|grep 80|grep tcp|awk ‘{print $5}’|awk -F: ‘{print $1}’|sort|uniq -c|sort -nr|head -n20
+
+netstat -ant |awk ‘/:80/{split($5,ip,":");++A[ip[1]]}END{for(i in A) print A[i],i}’ |sort -rn|head -n20
+用tcpdump嗅探80端口的访问看看谁最高
+
+tcpdump -i eth0 -tnn dst port 80 -c 1000 | awk -F"." ‘{print $1"."$2"."$3"."$4}’ | sort | uniq -c | sort -nr |head -20
+查找较多time_wait连接
+
+netstat -n|grep TIME_WAIT|awk ‘{print $5}’|sort|uniq -c|sort -rn|head -n20
+找查较多的SYN连接
+
+netstat -an | grep SYN | awk ‘{print $5}’ | awk -F: ‘{print $1}’ | sort | uniq -c | sort -nr | more
+根据端口列进程
+
+netstat -ntlp | grep 80 | awk ‘{print $7}’ | cut -d/ -f1
+获得访问前10位的ip地址
+
+cat access.log|awk ‘{print $1}’|sort|uniq -c|sort -nr|head -10
+cat access.log|awk ‘{counts[$(11)]+=1}; END {for(url in counts) print counts[url], url}’
+访问次数最多的文件或页面,取前20
+
+cat access.log|awk ‘{print $11}’|sort|uniq -c|sort -nr|head -20
+列出传输最大的几个exe文件（分析下载站的时候常用）
+
+cat access.log |awk ‘($7~/.exe/){print $10 " " $1 " " $4 " " $7}’|sort -nr|head -20
+列出输出大于200000byte(约200kb)的exe文件以及对应文件发生次数
+
+cat access.log |awk ‘($10 > 200000 && $7~/.exe/){print $7}’|sort -n|uniq -c|sort -nr|head -100
+如果日志最后一列记录的是页面文件传输时间，则有列出到客户端最耗时的页面
+
+cat access.log |awk ‘($7~/.php/){print $NF " " $1 " " $4 " " $7}’|sort -nr|head -100
+列出最最耗时的页面(超过60秒的)的以及对应页面发生次数
+
+cat access.log |awk ‘($NF > 60 && $7~/.php/){print $7}’|sort -n|uniq -c|sort -nr|head -100
+列出传输时间超过 30 秒的文件
+
+cat access.log |awk ‘($NF > 30){print $7}’|sort -n|uniq -c|sort -nr|head -20
+统计网站流量（G)
+
+cat access.log |awk ‘{sum+=$10} END {print sum/1024/1024/1024}’
+统计404的连接
+
+awk ‘($9 ~/404/)’ access.log | awk ‘{print $9,$7}’ | sort
+统计http status
+
+cat access.log |awk ‘{counts[$(9)]+=1}; END {for(code in counts) print code, counts[code]}'
+cat access.log |awk '{print $9}'|sort|uniq -c|sort -rn
+蜘蛛分析，查看是哪些蜘蛛在抓取内容。
+
+/usr/sbin/tcpdump -i eth0 -l -s 0 -w - dst port 80 | strings | grep -i user-agent | grep -i -E 'bot|crawler|slurp|spider'
+创建一个用户mandriva，其ID号为2002，基本组为distro（组ID为3003），附加组为linux；
+
+# groupadd linux
+# groupadd -g 3003 distro
+# useradd -u 2002 -g distro -G linux mandriva
+创建一个用户fedora，其全名为Fedora Community，默认shell为tcsh； # useradd -c "Fedora Community" -s /bin/tcsh fedora
+
+修改mandriva的ID号为4004，基本组为linux，附加组为distro和fedora；
+
+# usermod -u 4004 -g linux -G distro,fedora mandriva
+给fedora加密码，并设定其密码最短使用期限为2天，最长为50天；
+
+# passwd fedora
+# chage -m 2 -M 50 fedora
+调试命令
+
+strace -p pid
+写一个脚本
+
+1、创建一个组newgroup, id号为4000；
+2、创建一个用户mageedu1, id号为3001，附加组为newgroup；
+3、创建目录/tmp/hellodirxyz
+4、复制/etc/fstab至上面的目录中
+5、改变目录及内部文件的属主和属组为mageedu1;
+6、让目录及内部文件的其它用户没有任何权限；
+
+        #!/bin/bash
+        # Description:
+        # Version:
+        # Datetime:
+        # Author:
+
+        myGroup="newgroup1"
+        myUser="mageedu2"
+        myDir="/tmp/hellodirxyz1"
+        myID=3002
+
+        groupadd -g 4001 $myGroup
+        useradd -u $myID -G $myGroup $myUser
+        mkdir $myDir
+        cp /etc/fstab $myDir
+        chown -R $myUser:$myUser $myDir
+        chmod -R o= $myDir
+
+        unset myGroup myUser myID myDir
+统计/bin、/usr/bin、/sbin和/usr/sbin等各目录中的文件个数；
+
+# ls /bin | wc -l
+显示当前系统上所有用户的shell，要求，每种shell只显示一次；
+
+# cut -d: -f7 /etc/passwd | sort -u
+取出/etc/passwd文件的第7行；
+
+# head -7 /etc/passwd | tail -1
+显示第3题中取出的第7行的用户名；
+
+# head -7 /etc/passwd | tail -1 | cut -d: -f1
+
+# head -7 /etc/passwd | tail -1 | cut -d: -f1 | tr 'a-z' 'A-Z'
+统计/etc目录下以P或p开头的文件个数；
+
+# ls -d /etc/[Pp]* | wc -l
+写一个脚本，用for循环实现显示/etc/init.d/functions、/etc/rc.d/rc.sysinit和/etc/fstab各有多少行；
+
+for fileName in /etc/init.d/functions /etc/rc.d/rc.sysinit /etc/fstab; do
+    wc -l $fileName
+done
+
+#!/bin/bash
+for fileName in /etc/init.d/functions /etc/rc.d/rc.sysinit /etc/fstab; do
+    lineCount=`wc -l $fileName | cut -d' ' -f1`
+    echo "$fileName: $lineCount lines."
+done
+
+#!/bin/bash
+for fileName in /etc/init.d/functions /etc/rc.d/rc.sysinit /etc/fstab; do
+    echo "$fileName: `wc -l $fileName | cut -d' ' -f1` lines."
+done
+写一个脚本,将上一题中三个文件的复制到/tmp目录中；用for循环实现，分别将每个文件的最近一次的修改时间改为2016年12月15号15点43分；
+
+for fileName in /etc/init.d/functions /etc/rc.d/rc.sysinit /etc/fstab; do
+    cp $fileName /tmp
+    baseName=`basename $fileName`
+    touch -m -t 201109151327 /tmp/$baseName
+done
+写一个脚本, 显示/etc/passwd中第3、7和11个用户的用户名和ID号；
+
+for lineNo in 3 7 11; do
+    userInfo=`head -n $lineNo /etc/passwd | tail -1 | cut -d: -f1,3`
+    echo -e "User: `echo $userInfo | cut -d: -f1`\nUid: `echo $userInfo |cut -d: -f2`"
+done
+显示/proc/meminfo文件中以大小写s开头的行；
+
+# grep "^[sS]" /proc/meminfo
+# grep -i "^s" /proc/meminfo
+取出默认shell为非bash的用户；
+
+# grep -v "bash$" /etc/passwd | cut -d: -f1
+取出默认shell为bash的且其ID号最大的用户；
+
+# grep "bash$" /etc/passwd | sort -n -t: -k3 | tail -1 | cut -d: -f1
+显示/etc/rc.d/rc.sysinit文件中，以#开头，后面跟至少一个空白字符，而后又有至少一个非空白字符的行；
+
+# grep "^#[[:space:]]\{1,\}[^[:space:]]\{1,\}" /etc/rc.d/rc.sysinit
+显示/boot/grub/grub.conf中以至少一个空白字符开头的行；
+
+# grep "^[[:space:]]\{1,\}[^[:space:]]\{1,\}" /boot/grub/grub.conf
+找出/etc/passwd文件中一位数或两位数；
+
+# grep --color=auto "\<[0-9]\{1,2\}\>" /etc/passwd
+找出ifconfig命令结果中的1到255之间的整数；
+
+# ifconfig | grep -E --color=auto "\<([1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\>"
+查看当前系统上root用户的所有信息;
+
+# grep "^root\>" /etc/passwd
+添加用户bash和testbash、basher，而后找出当前系统上其用户名和默认shell相同的用户；
+
+# grep --color=auto "^\([[:alnum:]]\{1,\}\)\>.*\1$" /etc/passwd
+找出netstat -tan命令执行的结果中以“LISTEN”或“ESTABLISHED”结尾的行；
+
+取出当前系统上所有用户的shell，要求：每种shell只显示一次，且按升序显示；
+# cut -d: -f7 /etc/passwd | sort -u
 ```
 
-### 198.
+### 223. 开机自启动脚本
 
-```python
+```shell
+如果要添加为开机启动执行的脚本文件，可先将脚本复制或者软连接到/etc/init.d/目录下，然后用：
 
+    update-rc.d xxx defaults NN命令(NN为启动顺序)，
+将脚本添加到初始化执行的队列中去。
+
+注意如果脚本需要用到网络，则NN需设置一个比较大的数字，如99。
+
+1) 将你的启动脚本复制到 /etc/init.d目录下,以下假设你的脚本文件名为 test。
+
+2) 设置脚本文件的权限
+
+    $ sudo chmod 755 /etc/init.d/test
+3) 执行如下命令将脚本放到启动脚本中去：
+
+    $ cd /etc/init.d
+    $ sudo update-rc.d test defaults 95
 ```
 
-### 199.
-
-```python
-
-```
-
-### 200.
-
-```python
-
-```
-
-### 
