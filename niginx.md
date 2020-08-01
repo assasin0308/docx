@@ -7,6 +7,10 @@
 下载 : wget http://nginx.org/download/nginx-1.15.12.tar.gz
 解压 : tar zxvf nginx-1.15.12.tar.gz
 进入目录: cd nginx-1.15.12
+
+./configure --prefix=/usr/local/nginx --with-select_module  --without-select_module --with-poll_module  --without-poll_module --with-threads --with-file-aio  --with-http_ssl_module  --with-http_v2_module    --with-http_realip_module   --with-http_addition_module --with-http_xslt_module  --with-http_geoip_module      --with-http_geoip_module=dynamic --with-http_sub_module   --with-http_dav_module        --with-http_flv_module        --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module  --with-http_random_index_module --with-http_secure_link_module  --with-http_degradation_module --with-http_slice_module --with-mail  --with-mail=dynamic  --with-mail_ssl_module  --with-stream  --with-stream=dynamic  --with-stream_ssl_module  --with-stream_realip_module  --with-stream_geoip_module  --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module  --with-cpp_test_module  --with-libatomic   
+
+
 ./configure --prefix=/usr/local/nginx  (若出现错误安装: yum install pcre pcre-devel ) --add-module=../nginx-rtmp-module-1.2.1 (前提是先下载nginx-rtmp-module作为直播模块	https://github.com/arut/nginx-rtmp-module wget https://codeload.github.com/arut/nginx-rtmp-module/tar.gz/v1.2.1
 tar -zxvf v1.2.1
 //或者
