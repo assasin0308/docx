@@ -4276,10 +4276,19 @@ class RedisHelper():
 ## 五 Django
 
 ### 108. 项目应用环境创建 
+pip install virtualenv virtualenvwrapper
+
+vim ~/.bashrc 
+export VIRTUALENVWRAPPER_PYTHON=/usr/local/python3/bin/python3
+export WORKON_HOME=$HOME/.virtualenvs
+export VIRTUALENVWRAPPER_VIRTUALENV=/usr/local/python3/bin/virtualenv
+source /usr/local/python3/bin/virtualenvwrapper.sh
+source  ~/.bashrc 
 
 ```python
 # 创建虚拟环境
 mkvirtualenv [虚拟环境名称]
+mkvirtualenv -p /usr/local/python3/bin/python  py3
 # 删除虚拟环境
 rmvirtualenv [虚拟环境名称]
 # 退出虚拟环境
