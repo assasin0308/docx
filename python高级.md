@@ -5893,6 +5893,17 @@ CACHES = {
         'TIMEOUT': 60,
     },
 }
+CACHES = {
+    "default": {
+        "BACKEND": "redis_cache.cache.RedisCache",
+        "LOCATION": "localhost:6379",
+        'OPTIONS': {
+	   "CLIENT_CLASS":"django_redis.DefaultClient",
+	   "CONNECTION_POOL_KWARGS":{"max_connections":100},
+	   "PASSWORD":"XXXXXXXXXXXXXXXXXXX",
+	},
+    },
+}
 # 可以连接redis查看存的数据
 连接：redis-cli
 切换数据库：select 1
